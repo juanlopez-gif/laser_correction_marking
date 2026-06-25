@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Generated outputs
+salidas/
+
+# Archived old prototypes / generated files
+archivo_viejo/
+
+# Temporary and local editor files
+*.tmp
+*.temp
+*.log
+.DS_Store
+Thumbs.db
+
+# Matplotlib / Python runtime leftovers
+.matplotlib/
+.pytest_cache/

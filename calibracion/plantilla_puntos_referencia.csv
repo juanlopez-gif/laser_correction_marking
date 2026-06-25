@@ -1,0 +1,15 @@
+piece_id,capture_id,feature,point_id,x_profile_mm,y_profile_mm,usable,notes
+pieza_001,captura_inicial,linea_larga_x,1,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_larga_x,2,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_larga_x,3,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_larga_x,4,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_larga_x,5,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_larga_x,6,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_larga_x,7,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_larga_x,8,,,,punto sobre linea larga
+pieza_001,captura_inicial,linea_secundaria_origen,1,,,,punto sobre segunda linea
+pieza_001,captura_inicial,linea_secundaria_origen,2,,,,punto sobre segunda linea
+pieza_001,captura_inicial,linea_secundaria_origen,3,,,,punto sobre segunda linea
+pieza_001,captura_inicial,linea_secundaria_origen,4,,,,punto sobre segunda linea
+pieza_001,captura_inicial,linea_secundaria_origen,5,,,,punto sobre segunda linea
+
