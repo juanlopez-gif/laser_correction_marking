@@ -71,6 +71,8 @@ area_points = []
 area_patch = None
 area_mask_cache = None
 selecting_area = False
+selecting_origin = False
+origin_marker_artists = []
 
 
 def clean_cell(value):
@@ -122,11 +124,41 @@ def read_keyence_height_csv(path):
     return z, pixel_size, header
 
 
+def optional_float(row, key):
+    value = row.get(key)
+    if value is None:
+        return None
+    value = clean_cell(value)
+    if value == "":
+        return None
+    return float(value)
+
+
 def read_calibration_csv(path):
     points = []
+    transform_mode = None
+    origin = {
+        "origin_x_px": None,
+        "origin_y_px": None,
+        "origin_x_mm": None,
+        "origin_y_mm": None,
+        "profile_x_sign": None,
+        "profile_y_sign": None,
+        "origin_samlight_x_mm": None,
+        "origin_samlight_y_mm": None,
+    }
     with path.open("r", newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            for key in origin:
+                if origin[key] is None and key in row:
+                    origin[key] = optional_float(row, key)
+
+            if transform_mode is None and "transform_mode" in row:
+                mode_value = clean_cell(row.get("transform_mode", "")).lower()
+                if mode_value:
+                    transform_mode = mode_value
+
             use_value = clean_cell(row.get("use_for_affine", "yes")).lower()
             if use_value not in ("yes", "y", "si", "s", "true", "1"):
                 continue
@@ -137,11 +169,136 @@ def read_calibration_csv(path):
                 float(clean_cell(row["y_samlight_mm"])),
             ))
 
-    if len(points) < 3:
+    transform_mode = transform_mode or "origin_offset"
+    if transform_mode == "affine" and len(points) < 3:
         raise ValueError(
-            f"La calibracion necesita al menos 3 puntos activos. Archivo: {path}"
+            f"La calibracion afin necesita al menos 3 puntos activos. Archivo: {path}"
         )
-    return points
+    return points, origin, transform_mode
+
+
+def resolve_scanner_origin(origin, pixel_size):
+    has_px = origin["origin_x_px"] is not None or origin["origin_y_px"] is not None
+    has_mm = origin["origin_x_mm"] is not None or origin["origin_y_mm"] is not None
+    profile_x_sign = origin["profile_x_sign"] if origin["profile_x_sign"] is not None else 1.0
+    profile_y_sign = origin["profile_y_sign"] if origin["profile_y_sign"] is not None else 1.0
+
+    if has_px and has_mm:
+        raise ValueError(
+            "Define el origen en pixeles O en mm, pero no los dos a la vez."
+        )
+
+    if has_px:
+        if origin["origin_x_px"] is None or origin["origin_y_px"] is None:
+            raise ValueError("Si usas origin_x_px, tambien debes definir origin_y_px.")
+        origin_x_raw_mm = origin["origin_x_px"] * pixel_size
+        origin_y_raw_mm = origin["origin_y_px"] * pixel_size
+        description = (
+            f"origen por pixel: x_px={origin['origin_x_px']:.3f}, "
+            f"y_px={origin['origin_y_px']:.3f}, "
+            f"signos=({profile_x_sign:g}, {profile_y_sign:g})"
+        )
+        return origin_x_raw_mm, origin_y_raw_mm, profile_x_sign, profile_y_sign, description
+
+    if has_mm:
+        if origin["origin_x_mm"] is None or origin["origin_y_mm"] is None:
+            raise ValueError("Si usas origin_x_mm, tambien debes definir origin_y_mm.")
+        description = (
+            f"origen por mm crudos: x={origin['origin_x_mm']:.6f}, "
+            f"y={origin['origin_y_mm']:.6f}, "
+            f"signos=({profile_x_sign:g}, {profile_y_sign:g})"
+        )
+        return origin["origin_x_mm"], origin["origin_y_mm"], profile_x_sign, profile_y_sign, description
+
+    description = (
+        "origen por defecto: esquina superior izquierda del CSV, "
+        f"signos=({profile_x_sign:g}, {profile_y_sign:g})"
+    )
+    return 0.0, 0.0, profile_x_sign, profile_y_sign, description
+
+
+def resolve_samlight_origin(points, origin):
+    has_samlight_origin = (
+        origin["origin_samlight_x_mm"] is not None
+        or origin["origin_samlight_y_mm"] is not None
+    )
+    if has_samlight_origin:
+        if origin["origin_samlight_x_mm"] is None or origin["origin_samlight_y_mm"] is None:
+            raise ValueError(
+                "Si usas origin_samlight_x_mm, tambien debes definir origin_samlight_y_mm."
+            )
+        return (
+            origin["origin_samlight_x_mm"],
+            origin["origin_samlight_y_mm"],
+            "origen Samlight explicito en CSV",
+        )
+
+    if not points:
+        raise ValueError(
+            "Falta origin_samlight_x_mm/origin_samlight_y_mm o puntos para estimar el origen."
+        )
+
+    samlight_origin_x = float(np.mean([p[2] - p[0] for p in points]))
+    samlight_origin_y = float(np.mean([p[3] - p[1] for p in points]))
+    return (
+        samlight_origin_x,
+        samlight_origin_y,
+        "origen Samlight estimado como media de marcas: Samlight - dx/dy",
+    )
+
+
+def pixel_to_scanner_mm(x_px, y_px):
+    x_raw_mm = x_px * pixel_size
+    y_raw_mm = y_px * pixel_size
+    dx_mm = (x_raw_mm - scanner_origin_x_mm) * profile_x_sign
+    dy_mm = (y_raw_mm - scanner_origin_y_mm) * profile_y_sign
+    return dx_mm, dy_mm
+
+
+def recompute_coordinate_grids():
+    global x, y, X_GRID, Y_GRID
+    x = (x_raw - scanner_origin_x_mm) * profile_x_sign
+    y = (y_raw - scanner_origin_y_mm) * profile_y_sign
+    X_GRID, Y_GRID = np.meshgrid(x, y)
+
+
+def refresh_image_extents():
+    extent = [x.min(), x.max(), y.min(), y.max()]
+    if "im_height" in globals():
+        im_height.set_extent(extent)
+        ax_height.set_xlim(x.min(), x.max())
+        ax_height.set_ylim(y.min(), y.max())
+        ax_height.set_title(
+            f"Height range | min={im_height.norm.vmin:.4f} mm | max={im_height.norm.vmax:.4f} mm"
+        )
+        fig_height.canvas.draw_idle()
+    if "im_nodes" in globals():
+        im_nodes.set_extent(extent)
+        ax_nodes.set_xlim(x.min(), x.max())
+        ax_nodes.set_ylim(y.min(), y.max())
+
+
+def set_scanner_origin_from_display_click(x_display_mm, y_display_mm):
+    global scanner_origin_x_mm, scanner_origin_y_mm, area_mask_cache
+    raw_x_mm = (x_display_mm / profile_x_sign) + scanner_origin_x_mm
+    raw_y_mm = (y_display_mm / profile_y_sign) + scanner_origin_y_mm
+    scanner_origin_x_mm = raw_x_mm
+    scanner_origin_y_mm = raw_y_mm
+
+    area_points.clear()
+    area_mask_cache = None
+    recompute_coordinate_grids()
+    refresh_image_extents()
+    redraw_origin_marker()
+    redraw_area_patch()
+    update_nodes()
+
+    print(
+        "Origen scanner actualizado: "
+        f"origin_x_px={scanner_origin_x_mm / pixel_size:.3f}, "
+        f"origin_y_px={scanner_origin_y_mm / pixel_size:.3f}"
+    )
+    print("IMPORTANTE: copia esos origin_x_px/origin_y_px al CSV de calibracion si quieres dejarlo fijo.")
 
 
 def affine_from_points(points):
@@ -158,9 +315,11 @@ def affine_from_points(points):
 
 
 def scanner_to_samlight(x_mm, y_mm):
-    sx = affine_x[0] * x_mm + affine_x[1] * y_mm + affine_x[2]
-    sy = affine_y[0] * x_mm + affine_y[1] * y_mm + affine_y[2]
-    return sx, sy
+    if transform_mode == "affine":
+        sx = affine_x[0] * x_mm + affine_x[1] * y_mm + affine_x[2]
+        sy = affine_y[0] * x_mm + affine_y[1] * y_mm + affine_y[2]
+        return sx, sy
+    return samlight_origin_x_mm + x_mm, samlight_origin_y_mm + y_mm
 
 
 def dxf_config_for_level(level):
@@ -229,9 +388,8 @@ def iter_node_hatch_segments(node):
         xs_row = np.asarray(rows[y_px], dtype=int)
         xs_row.sort()
         for start_px, end_px in iter_contiguous_runs(xs_row):
-            x0_mm = start_px * pixel_size
-            x1_mm = (end_px + 1) * pixel_size
-            y_mm = -y_px * pixel_size
+            x0_mm, y_mm = pixel_to_scanner_mm(start_px, y_px)
+            x1_mm, _ = pixel_to_scanner_mm(end_px + 1, y_px)
             yield (*scanner_to_samlight(x0_mm, y_mm), *scanner_to_samlight(x1_mm, y_mm))
 
 
@@ -475,12 +633,28 @@ def clear_area_selection(_=None):
     print("Area de actuacion borrada. Se procesara todo el scan.")
 
 
+def start_origin_selection(_=None):
+    global selecting_origin, selecting_area
+    selecting_origin = True
+    selecting_area = False
+    print("Seleccion origen: haz click en el cruce fisico de las lineas en la ventana NODOS.")
+
+
 def on_nodes_click(event):
-    global selecting_area, area_mask_cache
-    if not selecting_area or event.inaxes is not ax_nodes:
+    global selecting_area, selecting_origin, area_mask_cache
+    if event.inaxes is not ax_nodes:
         return
     if event.xdata is None or event.ydata is None:
         return
+
+    if selecting_origin:
+        selecting_origin = False
+        set_scanner_origin_from_display_click(float(event.xdata), float(event.ydata))
+        return
+
+    if not selecting_area:
+        return
+
     area_points.append((float(event.xdata), float(event.ydata)))
     area_mask_cache = None
     print(f"Punto area {len(area_points)}: x={event.xdata:.3f} mm, y={event.ydata:.3f} mm")
@@ -509,6 +683,19 @@ def redraw_area_patch():
     fig_nodes.canvas.draw_idle()
 
 
+def redraw_origin_marker():
+    global origin_marker_artists
+    if "ax_nodes" not in globals():
+        return
+    for artist in origin_marker_artists:
+        artist.remove()
+    origin_marker_artists = [
+        ax_nodes.axvline(0, color="cyan", linewidth=1.2, linestyle="--"),
+        ax_nodes.axhline(0, color="cyan", linewidth=1.2, linestyle="--"),
+    ]
+    fig_nodes.canvas.draw_idle()
+
+
 def export_nodes_csv(_=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output = CSV_OUTPUT_DIR / f"Niveles_Nodos_{CSV_FILE.stem}_{timestamp}.csv"
@@ -522,8 +709,8 @@ def export_nodes_csv(_=None):
         "Nodo",
         "Altura_media_mm",
         "Area_mm2",
-        "X_mm",
-        "Y_mm",
+        "X_scanner_rel_mm",
+        "Y_scanner_rel_mm",
         "Z_mm",
         "X_samlight_mm",
         "Y_samlight_mm",
@@ -545,8 +732,7 @@ def export_nodes_csv(_=None):
             "",
         ])
         for x_px, y_px in zip(node["xs"], node["ys"]):
-            x_mm = x_px * pixel_size
-            y_mm = -y_px * pixel_size
+            x_mm, y_mm = pixel_to_scanner_mm(x_px, y_px)
             z_mm = z[y_px, x_px]
             sx, sy = scanner_to_samlight(x_mm, y_mm)
             rows.append([
@@ -620,8 +806,7 @@ def export_nodes_dxf(_=None):
             contour_points = []
             for point in approx[:, 0, :]:
                 x_px, y_px = int(point[0]), int(point[1])
-                x_mm = x_px * pixel_size
-                y_mm = -y_px * pixel_size
+                x_mm, y_mm = pixel_to_scanner_mm(x_px, y_px)
                 contour_points.append(scanner_to_samlight(x_mm, y_mm))
             add_dxf_polyline(lines, layer, color, contour_points)
             contour_count += 1
@@ -641,12 +826,31 @@ def export_nodes_dxf(_=None):
 # --- LECTURA ---
 z, pixel_size, header = read_keyence_height_csv(CSV_FILE)
 ny, nx = z.shape
-x = np.arange(nx) * pixel_size
-y = -np.arange(ny) * pixel_size
-X_GRID, Y_GRID = np.meshgrid(x, y)
 
-CALIBRATION_POINTS = read_calibration_csv(CALIBRATION_FILE)
-affine_x, affine_y = affine_from_points(CALIBRATION_POINTS)
+CALIBRATION_POINTS, ORIGIN_CONFIG, transform_mode = read_calibration_csv(CALIBRATION_FILE)
+if transform_mode not in ("origin_offset", "affine"):
+    raise ValueError("transform_mode debe ser 'origin_offset' o 'affine'.")
+
+(
+    scanner_origin_x_mm,
+    scanner_origin_y_mm,
+    profile_x_sign,
+    profile_y_sign,
+    scanner_origin_description,
+) = resolve_scanner_origin(
+    ORIGIN_CONFIG,
+    pixel_size,
+)
+samlight_origin_x_mm, samlight_origin_y_mm, samlight_origin_description = resolve_samlight_origin(
+    CALIBRATION_POINTS,
+    ORIGIN_CONFIG,
+)
+if transform_mode == "affine":
+    affine_x, affine_y = affine_from_points(CALIBRATION_POINTS)
+
+x_raw = np.arange(nx) * pixel_size
+y_raw = np.arange(ny) * pixel_size
+recompute_coordinate_grids()
 
 z_min = float(np.nanmin(z))
 z_max = float(np.nanmax(z))
@@ -655,14 +859,24 @@ valid = np.sum(~np.isnan(z))
 print("\n--- INFORMACION DEL SCAN ---")
 print(f"CSV entrada: {CSV_FILE}")
 print(f"Calibracion: {CALIBRATION_FILE}")
+print(f"Origen scanner: {scanner_origin_description}")
+print(f"Origen Samlight: ({samlight_origin_x_mm:.6f}, {samlight_origin_y_mm:.6f})")
+print(f"Modo Samlight: {samlight_origin_description}")
+print(f"Modo transformacion: {transform_mode}")
 print(f"Dimensiones: {nx} x {ny} pixeles")
 print(f"Area fisica: {nx * pixel_size:.2f} x {ny * pixel_size:.2f} mm")
+print(f"Rango X relativo origen: {x.min():.3f} a {x.max():.3f} mm")
+print(f"Rango Y relativo origen: {y.min():.3f} a {y.max():.3f} mm")
 print(f"Altura minima: {z_min:.3f} mm")
 print(f"Altura maxima: {z_max:.3f} mm")
 print(f"Valores validos: {valid} / {z.size}")
 print("\n--- TRANSFORMACION SCANNER -> SAMLIGHT ---")
-print(f"X = {affine_x[0]:.6f}*x + {affine_x[1]:.6f}*y + {affine_x[2]:.6f}")
-print(f"Y = {affine_y[0]:.6f}*x + {affine_y[1]:.6f}*y + {affine_y[2]:.6f}")
+if transform_mode == "affine":
+    print(f"X = {affine_x[0]:.6f}*x + {affine_x[1]:.6f}*y + {affine_x[2]:.6f}")
+    print(f"Y = {affine_y[0]:.6f}*x + {affine_y[1]:.6f}*y + {affine_y[2]:.6f}")
+else:
+    print(f"X = {samlight_origin_x_mm:.6f} + dx")
+    print(f"Y = {samlight_origin_y_mm:.6f} + dy")
 
 # Ajuste inicial de nodos para test2
 positive_max = max(z_max, 0.001)
@@ -689,7 +903,7 @@ im_height = ax_height.imshow(
 ax_height.set_xlabel("X [mm]")
 ax_height.set_ylabel("Y [mm]")
 ax_height.set_title(f"Height range | min={z_min:.4f} mm | max={z_max:.4f} mm")
-ax_height.set_xlim(0, x.max())
+ax_height.set_xlim(x.min(), x.max())
 ax_height.set_ylim(y.min(), y.max())
 fig_height.colorbar(im_height, ax=ax_height, label="Altura [mm]")
 
@@ -739,7 +953,7 @@ im_nodes = ax_nodes.imshow(
 )
 ax_nodes.set_xlabel("X [mm]")
 ax_nodes.set_ylabel("Y [mm]")
-ax_nodes.set_xlim(0, x.max())
+ax_nodes.set_xlim(x.min(), x.max())
 ax_nodes.set_ylim(y.min(), y.max())
 ax_nodes.grid(True, alpha=0.25)
 
@@ -759,25 +973,30 @@ ax_csv = plt.axes([0.70, 0.08, 0.12, 0.04])
 ax_dxf = plt.axes([0.84, 0.08, 0.12, 0.04])
 ax_area = plt.axes([0.70, 0.02, 0.12, 0.04])
 ax_clear = plt.axes([0.84, 0.02, 0.12, 0.04])
+ax_origin = plt.axes([0.70, 0.14, 0.26, 0.04])
 btn_csv = Button(ax_csv, "Exportar CSV", color="lightblue", hovercolor="skyblue")
 btn_dxf = Button(ax_dxf, "Exportar DXF", color="lightgreen", hovercolor="lime")
 btn_area = Button(ax_area, "Marcar area", color="khaki", hovercolor="gold")
 btn_clear = Button(ax_clear, "Borrar area", color="mistyrose", hovercolor="lightcoral")
+btn_origin = Button(ax_origin, "Marcar origen", color="lightcyan", hovercolor="cyan")
 btn_csv.on_clicked(export_nodes_csv)
 btn_dxf.on_clicked(export_nodes_dxf)
 btn_area.on_clicked(start_area_selection)
 btn_clear.on_clicked(clear_area_selection)
+btn_origin.on_clicked(start_origin_selection)
 
 active_level = [4]
 fig_nodes.canvas.mpl_connect("key_press_event", on_key)
 fig_nodes.canvas.mpl_connect("button_press_event", on_nodes_click)
 
+redraw_origin_marker()
 update_nodes()
 
 print("\nControles ventana NODOS:")
 print("  Tecla 4/3/2: selecciona nivel activo")
 print("  Flecha arriba/abajo: cambia umbral +/- 0.001 mm")
 print("  Flecha derecha/izquierda: cambia umbral +/- 0.010 mm")
+print("  Marcar origen: haz click en el cruce fisico de las lineas ANTES de exportar")
 print("  Marcar area: pulsa el boton y haz 4 clicks sobre la zona de actuacion")
 print("  CSV/DXF: exportan SOLO esa zona si hay area marcada")
 print("  CSV/DXF: incluyen coordenadas scanner y coordenadas corregidas Samlight")
