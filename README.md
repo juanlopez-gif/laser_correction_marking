@@ -11,6 +11,10 @@ Por ahora, la herramienta que usamos como flujo principal es:
 python .\interfaz_calibracion_manual_qt.py .\csv_entrada\test5.csv
 ```
 
+Esta es la herramienta principal del proyecto en el estado actual. No necesita
+que definas un origen fisico manualmente: la referencia queda definida por los
+puntos que marcas en el heightmap y sus coordenadas reales de Samlight.
+
 Este archivo abre una unica ventana con el heightmap a la izquierda y pestanas
 de trabajo a la derecha. Sirve para:
 
@@ -25,15 +29,19 @@ de trabajo a la derecha. Sirve para:
 - Anadir o quitar niveles de altura para el DXF.
 - Seleccionar un perfil de 1 mm para COMSOL y exportarlo como CSV/TXT `x_mm,y_mm`.
 
-La herramienta antigua de nodos/area completa sigue disponible:
+La herramienta `interfazmejorada.py` sigue disponible, pero ahora mismo no es
+el flujo principal:
 
 ```powershell
 python .\interfazmejorada.py
 ```
 
-`interfazmejorada.py` se usa cuando quieres procesar una zona completa del
-heightmap y exportar nodos/rellenos por bandas de altura. Para calibracion fina,
-perfiles y COMSOL, usar la Qt.
+Su objetivo es el flujo final deseado: dada una pieza, seleccionar un area,
+filtrar picos por bandas de altura y generar nodos/rellenos para Samlight. Pero
+por ahora no lo usamos como herramienta principal porque aparecieron problemas
+de referencia/origen/offset y algunas salidas quedaban descuadradas respecto a
+la realidad. Hasta resolver completamente esa referencia global, para trabajo
+fiable usamos `interfaz_calibracion_manual_qt.py`.
 
 La version Matplotlib queda como referencia antigua:
 
@@ -74,7 +82,11 @@ laser_correction/
     20260625_limpieza/
 ```
 
-## Uso Normal
+## Uso De Interfazmejorada
+
+Esta seccion documenta `interfazmejorada.py`, pero no es el flujo principal
+actual. Esta herramienta queda como objetivo/futuro para procesar areas
+completas cuando resolvamos del todo la referencia global.
 
 1. Mete el CSV del profilometro en `csv_entrada/`.
 2. Mete o edita el CSV de calibracion en `calibracion/`.
@@ -103,7 +115,7 @@ Si pasas solo el nombre del CSV, tambien lo buscara dentro de `csv_entrada/`:
 python .\interfazmejorada.py mi_pieza.csv
 ```
 
-## Ventanas
+## Ventanas De Interfazmejorada
 
 La aplicacion abre dos ventanas.
 
@@ -200,6 +212,11 @@ Flujo:
 
 La version Qt se abre en una sola ventana: pieza/heightmap a la izquierda y
 pestanas de trabajo a la derecha.
+
+Nota importante: en esta herramienta no se define origen. Cada punto marcado
+en el heightmap se empareja con su coordenada real de Samlight, y con esos pares
+se calcula la transformacion. Con 3 puntos ya hay transformacion afin; con 5 o
+mas puntos repartidos suele ser mas robusta.
 
 1. En la pestana `Heightmap`, ajusta el `height range` con los sliders `Min` y `Max`.
    Tambien puedes escribir valores exactos en `Min exacto` y `Max exacto`.
