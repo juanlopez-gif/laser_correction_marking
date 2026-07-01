@@ -1,0 +1,5 @@
+piece_id,cycle,date,profile_before_file,profile_after_file,angle_between_lines_deg,angle_error_from_90_deg,transform_model,tolerance_mm,rms_error_mm,max_error_mm,validation_shape,validation_max_error_mm,accepted,notes
+pieza_001,1,,,,,,rigid_or_affine,0.05,,,,,,
+pieza_001,2,,,,,,rigid_or_affine,0.05,,,,,,
+pieza_001,3,,,,,,rigid_or_affine,0.05,,,,,,
+

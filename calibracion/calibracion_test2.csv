@@ -1,0 +1,5 @@
+id,x_scanner_rel_mm,y_scanner_rel_mm,x_samlight_mm,y_samlight_mm,use_for_affine
+T1,4.331,-4.493,-55,35,yes
+T2,14.347,-4.497,-45,35,yes
+T3,4.283,-14.531,-55,25,yes
+

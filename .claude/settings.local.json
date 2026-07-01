@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(pip install pyqtgraph --upgrade 2>&1)",
+      "PowerShell(python --version)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(dir .claude /b)",
+      "PowerShell(Get-ChildItem \"e:\\\\Juan\\\\laser_correction_marking-main\\\\salidas\" -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum | Select-Object @{n='MB';e={[math]::Round\\($_.Sum/1MB,1\\)}}, Count; Get-ChildItem \"e:\\\\Juan\\\\laser_correction_marking-main\\\\archivo_viejo\" -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum | Select-Object @{n='MB';e={[math]::Round\\($_.Sum/1MB,1\\)}}, Count)",
+      "Bash(git add *)"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+piece_id,cycle,mark_id,mark_role,commanded_x_samlight_mm,commanded_y_samlight_mm,measured_x_ref_mm,measured_y_ref_mm,predicted_x_samlight_mm,predicted_y_samlight_mm,error_x_mm,error_y_mm,error_norm_mm,used_for_fit,notes
+pieza_001,1,M0,centro,,,,,,,,,,yes,marca central
+pieza_001,1,M1,margen_inferior_izquierdo,,,,,,,,,,yes,marca no alineada
+pieza_001,1,M2,margen_inferior_derecho,,,,,,,,,,yes,marca no alineada
+pieza_001,1,M3,margen_superior_derecho,,,,,,,,,,yes,marca no alineada
+pieza_001,1,M4,margen_superior_izquierdo,,,,,,,,,,yes,marca no alineada
+
