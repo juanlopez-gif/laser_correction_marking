@@ -1,3 +1,4 @@
+
 import csv
 import sys
 from dataclasses import dataclass
@@ -51,7 +52,27 @@ LEVEL_STYLE_COLORS = [
     (80, 80, 80),
 ]
 
-DXF_COLOR_CODES = ["3", "6", "1", "4", "30", "5", "8"]
+DXF_COLOR_CODES = ["3", "6", "1", "4", "30", "5", "8", "30", "3", "4", "6", "5", "6", "4"]
+
+SAMLIGHT_PEN_RGB = {
+    1: (255, 0, 0),
+    2: (0, 255, 0),
+    3: (0, 0, 255),
+    4: (0, 128, 255),
+    5: (255, 170, 0),
+    6: (0, 170, 170),
+    7: (85, 85, 85),
+    8: (255, 85, 0),
+    9: (0, 170, 0),
+    10: (255, 255, 0),
+    11: (255, 0, 255),
+    12: (0, 0, 85),
+    13: (255, 170, 255),
+    14: (170, 225, 255),
+}
+
+DEFAULT_CALIBRATION_CROSSES_PEN = 4
+DEFAULT_WORK_CROSSES_PEN = 6
 
 HEIGHT_LUT_POSITIONS = np.array([0.00, 0.35, 0.50, 0.68, 0.82, 1.00], dtype=float)
 HEIGHT_LUT_COLORS = np.array([
@@ -187,6 +208,56 @@ def add_dxf_line(lines, layer, color, x0, y0, x1, y1):
     ])
 
 
+def svg_rgb_for_config(cfg):
+    if "rgb" in cfg:
+        return tuple(cfg["rgb"])
+    pin = str(cfg.get("pin", ""))
+    if pin.startswith("PIN_"):
+        try:
+            return SAMLIGHT_PEN_RGB.get(int(pin.split("_", 1)[1]), (0, 0, 0))
+        except ValueError:
+            pass
+    return (0, 0, 0)
+
+
+def svg_escape(value):
+    return (str(value).replace("&", "&amp;")
+                      .replace('"', "&quot;")
+                      .replace("<", "&lt;")
+                      .replace(">", "&gt;"))
+
+
+def write_svg_lines(path, segments):
+    if not segments:
+        return
+    xs = [float(v) for seg in segments for v in (seg["x0"], seg["x1"])]
+    ys = [float(v) for seg in segments for v in (seg["y0"], seg["y1"])]
+    margin = 1.0
+    x_min = min(xs) - margin
+    x_max = max(xs) + margin
+    y_min = min(ys) - margin
+    y_max = max(ys) + margin
+    width = max(x_max - x_min, 0.001)
+    height = max(y_max - y_min, 0.001)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<svg xmlns="http://www.w3.org/2000/svg"',
+        f'     width="{width:.6f}mm" height="{height:.6f}mm"',
+        f'     viewBox="{x_min:.6f} {-y_max:.6f} {width:.6f} {height:.6f}">',
+        '  <g fill="none" stroke-width="0.02" stroke-linecap="round">',
+    ]
+    for seg in segments:
+        r, g, b = seg["rgb"]
+        lines.append(
+            f'    <line id="{svg_escape(seg["layer"])}" '
+            f'x1="{seg["x0"]:.6f}" y1="{-seg["y0"]:.6f}" '
+            f'x2="{seg["x1"]:.6f}" y2="{-seg["y1"]:.6f}" '
+            f'stroke="rgb({int(r)},{int(g)},{int(b)})" />'
+        )
+    lines.extend(["  </g>", "</svg>"])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 class CalibrationViewBox(pg.ViewBox):
     clicked = QtCore.Signal(float, float)
     dragStarted = QtCore.Signal(float, float)
@@ -307,6 +378,12 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             3: self.level_n3,
             4: self.level_n4,
         }
+        self.level_pen_assignments = {
+            level: self.default_pen_for_level(level)
+            for level in self.level_thresholds
+        }
+        self.calibration_crosses_pen = DEFAULT_CALIBRATION_CROSSES_PEN
+        self.work_crosses_pen = DEFAULT_WORK_CROSSES_PEN
 
         self.points = []
         self.selected_index = None
@@ -544,6 +621,14 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         layout.addLayout(buttons2)
         self.btn_save_cal.clicked.connect(self.save_calibration_points)
         self.btn_cross_dxf.clicked.connect(self.export_crosses_dxf)
+
+        pen_row = QtWidgets.QHBoxLayout()
+        self.combo_calibration_crosses_pen = self.make_pen_combo(self.calibration_crosses_pen)
+        pen_row.addWidget(QtWidgets.QLabel("Pen cruces calibracion"))
+        pen_row.addWidget(self.combo_calibration_crosses_pen, 1)
+        layout.addLayout(pen_row)
+        self.combo_calibration_crosses_pen.currentIndexChanged.connect(
+            lambda _idx: self.set_calibration_crosses_pen(self.combo_calibration_crosses_pen.currentData()))
         return group
 
     def make_calibration_help_group(self):
@@ -609,6 +694,14 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         note.setWordWrap(True)
         note.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(note)
+
+        pen_row = QtWidgets.QHBoxLayout()
+        self.combo_work_crosses_pen = self.make_pen_combo(self.work_crosses_pen)
+        pen_row.addWidget(QtWidgets.QLabel("Pen cruces trabajo"))
+        pen_row.addWidget(self.combo_work_crosses_pen, 1)
+        layout.addLayout(pen_row)
+        self.combo_work_crosses_pen.currentIndexChanged.connect(
+            lambda _idx: self.set_work_crosses_pen(self.combo_work_crosses_pen.currentData()))
 
         btn_row = QtWidgets.QHBoxLayout()
         self.btn_add_wp = QtWidgets.QPushButton("➕ Nuevo punto")
@@ -724,6 +817,14 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         slider.setValue(self.value_to_slider(value))
         return slider
 
+    def make_pen_combo(self, selected_pen):
+        combo = QtWidgets.QComboBox()
+        for pen, rgb in sorted(SAMLIGHT_PEN_RGB.items()):
+            combo.addItem(f"Pen {pen}  RGB {rgb[0]},{rgb[1]},{rgb[2]}", pen)
+        index = combo.findData(int(selected_pen))
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        return combo
+
     def value_to_slider(self, value):
         if self.z_max <= self.z_min:
             return 0
@@ -781,16 +882,27 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
     def sorted_level_ids(self):
         return sorted(self.level_thresholds)
 
+    def default_pen_for_level(self, level):
+        return int(np.clip(int(level) - 1, 1, max(SAMLIGHT_PEN_RGB)))
+
+    def pen_rgb(self, pen):
+        return SAMLIGHT_PEN_RGB.get(int(pen), (0, 0, 0))
+
+    def pen_dxf_color(self, pen):
+        idx = (int(pen) - 1) % len(DXF_COLOR_CODES)
+        return DXF_COLOR_CODES[idx]
+
     def level_color(self, level):
         return LEVEL_STYLE_COLORS[(int(level) - 2) % len(LEVEL_STYLE_COLORS)]
 
     def dxf_config_for_level(self, level):
-        idx = (int(level) - 2) % len(DXF_COLOR_CODES)
-        pin = f"PIN_{int(level) - 1}"
+        pen_idx = self.level_pen_assignments.get(int(level), self.default_pen_for_level(level))
+        pin = f"PEN_{pen_idx}"
         return {
             "pin": pin,
             "layer": f"{pin}_NIVEL_{int(level)}",
-            "color": DXF_COLOR_CODES[idx],
+            "color": self.pen_dxf_color(pen_idx),
+            "rgb": self.pen_rgb(pen_idx),
         }
 
     def rebuild_level_controls(self):
@@ -808,20 +920,44 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             label.setStyleSheet(f"font-weight: 700; color: rgb({color[0]}, {color[1]}, {color[2]});")
             spin = self.make_spin(self.level_thresholds[level] * 1000, self.z_min * 1000, self.z_max * 1000, decimals=2, step=0.5)
             slider = self.make_slider(self.level_thresholds[level])
+            pen_combo = self.make_pen_combo(self.level_pen_assignments.get(level, self.default_pen_for_level(level)))
             remove = QtWidgets.QPushButton("Quitar")
             remove.setEnabled(len(self.level_thresholds) > 1)
 
             row.addWidget(label, 0, 0)
             row.addWidget(spin, 0, 1)
-            row.addWidget(remove, 0, 2)
-            row.addWidget(slider, 1, 0, 1, 3)
+            row.addWidget(pen_combo, 0, 2)
+            row.addWidget(remove, 0, 3)
+            row.addWidget(slider, 1, 0, 1, 4)
 
             spin.valueChanged.connect(lambda value, lvl=level: self.set_level_threshold(lvl, float(value) / 1000.0, "spin"))
             slider.valueChanged.connect(lambda value, lvl=level: self.set_level_threshold(lvl, self.slider_to_value(value), "slider"))
+            pen_combo.currentIndexChanged.connect(lambda _idx, lvl=level, combo=pen_combo: self.set_level_pen(lvl, combo.currentData()))
             remove.clicked.connect(lambda _checked=False, lvl=level: self.remove_level(lvl))
 
-            self.level_controls[level] = {"spin": spin, "slider": slider, "row": row_widget}
+            self.level_controls[level] = {"spin": spin, "slider": slider, "pen": pen_combo, "row": row_widget}
             self.levels_layout.addWidget(row_widget)
+
+    def set_level_pen(self, level, pen):
+        if pen is None:
+            return
+        level = int(level)
+        pen = int(pen)
+        self.level_pen_assignments[level] = pen
+        self.update_dxf_profile_plot()
+        self.log(f"N{level} asignado a Pen {pen} RGB {self.pen_rgb(pen)}.")
+
+    def set_calibration_crosses_pen(self, pen):
+        if pen is None:
+            return
+        self.calibration_crosses_pen = int(pen)
+        self.log(f"Cruces de calibracion asignadas a Pen {pen} RGB {self.pen_rgb(pen)}.")
+
+    def set_work_crosses_pen(self, pen):
+        if pen is None:
+            return
+        self.work_crosses_pen = int(pen)
+        self.log(f"Cruces de trabajo asignadas a Pen {pen} RGB {self.pen_rgb(pen)}.")
 
     def set_level_threshold(self, level, value, source):
         if self.block_updates:
@@ -836,6 +972,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         current_max = max(self.level_thresholds.values()) if self.level_thresholds else max(self.z_min, 0.0)
         step = max((self.z_max - self.z_min) * 0.03, 0.001)
         self.level_thresholds[next_level] = float(np.clip(current_max + step, self.z_min, self.z_max))
+        self.level_pen_assignments[next_level] = self.default_pen_for_level(next_level)
         self.enforce_level_order()
         self.rebuild_level_controls()
         self.update_dxf_profile_plot()
@@ -852,6 +989,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             return
         removed = int(level)
         self.level_thresholds.pop(removed, None)
+        self.level_pen_assignments.pop(removed, None)
         self.rebuild_level_controls()
         self.update_dxf_profile_plot()
         self.log(f"Nivel N{removed} quitado.")
@@ -1708,15 +1846,34 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = DXF_OUTPUT_DIR / f"Cruces_Calibracion_{self.csv_file.stem}_{timestamp}.dxf"
-        cfg = {"layer": "CALIB_CRUCES_0p5mm", "color": "4"}
+        svg_output = output.with_suffix(".svg")
+        cfg = {
+            "layer": f"CALIB_CRUCES_PEN_{self.calibration_crosses_pen}_0p5mm",
+            "color": self.pen_dxf_color(self.calibration_crosses_pen),
+            "rgb": self.pen_rgb(self.calibration_crosses_pen),
+        }
         lines = dxf_header([cfg])
+        svg_segments = []
         half = CROSS_SIZE_MM / 2.0
         for point in self.points:
             add_dxf_line(lines, cfg["layer"], cfg["color"], point.samlight_x_mm - half, point.samlight_y_mm, point.samlight_x_mm + half, point.samlight_y_mm)
+            svg_segments.append({
+                "layer": cfg["layer"],
+                "rgb": svg_rgb_for_config(cfg),
+                "x0": point.samlight_x_mm - half, "y0": point.samlight_y_mm,
+                "x1": point.samlight_x_mm + half, "y1": point.samlight_y_mm,
+            })
             add_dxf_line(lines, cfg["layer"], cfg["color"], point.samlight_x_mm, point.samlight_y_mm - half, point.samlight_x_mm, point.samlight_y_mm + half)
+            svg_segments.append({
+                "layer": cfg["layer"],
+                "rgb": svg_rgb_for_config(cfg),
+                "x0": point.samlight_x_mm, "y0": point.samlight_y_mm - half,
+                "x1": point.samlight_x_mm, "y1": point.samlight_y_mm + half,
+            })
         lines.extend(["0", "ENDSEC", "0", "EOF"])
         output.write_text("\n".join(lines) + "\n", encoding="ascii")
-        self.log(f"DXF cruces guardado:\n{output}")
+        write_svg_lines(svg_output, svg_segments)
+        self.log(f"DXF cruces guardado:\n{output}\nSVG paralelo:\n{svg_output}")
 
     def update_profile_from_controls(self):
         p1 = self._point_by_id_combined(self.combo_p1.currentText())
@@ -1978,10 +2135,16 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = DXF_OUTPUT_DIR / f"Perfiles_Samlight_{self.csv_file.stem}_{timestamp}.dxf"
+        svg_output = output.with_suffix(".svg")
         layer_configs = [self.dxf_config_for_level(level) for level in self.sorted_level_ids()]
-        wp_cfg = {"layer": "TRABAJO_CRUCES_0p5mm", "color": "6"}
+        wp_cfg = {
+            "layer": f"TRABAJO_CRUCES_PEN_{self.work_crosses_pen}_0p5mm",
+            "color": self.pen_dxf_color(self.work_crosses_pen),
+            "rgb": self.pen_rgb(self.work_crosses_pen),
+        }
         all_configs = layer_configs + ([wp_cfg] if self.work_points else [])
         lines = dxf_header(all_configs)
+        svg_segments = []
         total_exported = {int(level): 0 for level in self.sorted_level_ids()}
         total_skipped = 0
         ok = 0
@@ -2007,6 +2170,12 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
                 cfg = self.dxf_config_for_level(level)
                 add_dxf_line(lines, cfg["layer"], cfg["color"],
                              sx[start_idx], sy[start_idx], sx[end_idx], sy[end_idx])
+                svg_segments.append({
+                    "layer": cfg["layer"],
+                    "rgb": svg_rgb_for_config(cfg),
+                    "x0": float(sx[start_idx]), "y0": float(sy[start_idx]),
+                    "x1": float(sx[end_idx]), "y1": float(sy[end_idx]),
+                })
                 total_exported[level] += 1
             ok += 1
         half = CROSS_SIZE_MM / 2.0
@@ -2014,16 +2183,30 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
                          wp.samlight_x_mm - half, wp.samlight_y_mm,
                          wp.samlight_x_mm + half, wp.samlight_y_mm)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm - half, "y0": wp.samlight_y_mm,
+                "x1": wp.samlight_x_mm + half, "y1": wp.samlight_y_mm,
+            })
             add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
                          wp.samlight_x_mm, wp.samlight_y_mm - half,
                          wp.samlight_x_mm, wp.samlight_y_mm + half)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm, "y0": wp.samlight_y_mm - half,
+                "x1": wp.samlight_x_mm, "y1": wp.samlight_y_mm + half,
+            })
         lines.extend(["0", "ENDSEC", "0", "EOF"])
         output.write_text("\n".join(lines) + "\n", encoding="ascii")
+        write_svg_lines(svg_output, svg_segments)
         exported_text = " ".join(f"N{level}={count}" for level, count in total_exported.items())
         wp_text = f" | cruces trabajo={len(self.work_points)}" if self.work_points else ""
         self.log(
             f"DXF multi-perfil guardado ({ok}/{len(self.profile_list)} perfiles):\n"
-            f"{output}\n{exported_text} | cortos={total_skipped}{wp_text}")
+            f"{output}\nSVG paralelo:\n{svg_output}\n"
+            f"{exported_text} | cortos={total_skipped}{wp_text}")
 
     def export_profile_dxf(self):
         if self.dxf_profile_data is None:
@@ -2034,10 +2217,16 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         p1 = self.dxf_profile_data["p1"]
         p2 = self.dxf_profile_data["p2"]
         output = DXF_OUTPUT_DIR / f"Perfil_Samlight_{self.csv_file.stem}_{p1}_{p2}_{timestamp}.dxf"
+        svg_output = output.with_suffix(".svg")
         layer_configs = [self.dxf_config_for_level(level) for level in self.sorted_level_ids()]
-        wp_cfg = {"layer": "TRABAJO_CRUCES_0p5mm", "color": "6"}
+        wp_cfg = {
+            "layer": f"TRABAJO_CRUCES_PEN_{self.work_crosses_pen}_0p5mm",
+            "color": self.pen_dxf_color(self.work_crosses_pen),
+            "rgb": self.pen_rgb(self.work_crosses_pen),
+        }
         all_configs = layer_configs + ([wp_cfg] if self.work_points else [])
         lines = dxf_header(all_configs)
+        svg_segments = []
         sx = self.dxf_profile_data["samlight_x_mm"]
         sy = self.dxf_profile_data["samlight_y_mm"]
         distance = self.dxf_profile_data["distance_mm"]
@@ -2051,21 +2240,42 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
                 continue
             cfg = self.dxf_config_for_level(level)
             add_dxf_line(lines, cfg["layer"], cfg["color"], sx[start_idx], sy[start_idx], sx[end_idx], sy[end_idx])
+            svg_segments.append({
+                "layer": cfg["layer"],
+                "rgb": svg_rgb_for_config(cfg),
+                "x0": float(sx[start_idx]), "y0": float(sy[start_idx]),
+                "x1": float(sx[end_idx]), "y1": float(sy[end_idx]),
+            })
             exported[level] += 1
         half = CROSS_SIZE_MM / 2.0
         for wp in self.work_points:
             add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
                          wp.samlight_x_mm - half, wp.samlight_y_mm,
                          wp.samlight_x_mm + half, wp.samlight_y_mm)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm - half, "y0": wp.samlight_y_mm,
+                "x1": wp.samlight_x_mm + half, "y1": wp.samlight_y_mm,
+            })
             add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
                          wp.samlight_x_mm, wp.samlight_y_mm - half,
                          wp.samlight_x_mm, wp.samlight_y_mm + half)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm, "y0": wp.samlight_y_mm - half,
+                "x1": wp.samlight_x_mm, "y1": wp.samlight_y_mm + half,
+            })
 
         lines.extend(["0", "ENDSEC", "0", "EOF"])
         output.write_text("\n".join(lines) + "\n", encoding="ascii")
+        write_svg_lines(svg_output, svg_segments)
         exported_text = " ".join(f"N{level}={count}" for level, count in exported.items())
         wp_text = f" | cruces trabajo={len(self.work_points)}" if self.work_points else ""
-        self.log(f"DXF perfil guardado:\n{output}\n{exported_text} | cortos ignorados={skipped}{wp_text}")
+        self.log(
+            f"DXF perfil guardado:\n{output}\nSVG paralelo:\n{svg_output}\n"
+            f"{exported_text} | cortos ignorados={skipped}{wp_text}")
 
     def export_profile_csv(self):
         if self.dxf_profile_data is None:
