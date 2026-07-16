@@ -1,433 +1,386 @@
-# Laser Correction / Samlight
+# Laser Correction — SAMLight Height Profiler
 
-Herramientas Python para trabajar con CSVs de altura del profilometro,
-calibracion manual laser/Samlight, perfiles 2D y DXF.
+Python tools for working with VR-6000 heightmap CSVs from the Keyence profilometer:
+calibrating the scanner → SAMLight coordinate transform, generating DXF trajectories,
+and interactively comparing PRE/POST laser correction profiles.
 
-## Estado Actual
+---
 
-Por ahora, la herramienta que usamos como flujo principal es:
+## Requirements
 
-```powershell
-python .\interfaz_calibracion_manual_qt.py .\csv_entrada\test5.csv
-```
+| Requirement | Version |
+|---|---|
+| Python | **3.11** (required — Anaconda ships an old pyqtgraph incompatible with PySide6) |
+| PySide6 | >= 6.4 |
+| pyqtgraph | >= 0.13 |
+| numpy, scipy | any recent |
 
-Esta es la herramienta principal del proyecto en el estado actual. No necesita
-que definas un origen fisico manualmente: la referencia queda definida por los
-puntos que marcas en el heightmap y sus coordenadas reales de Samlight.
-
-Este archivo abre una unica ventana con el heightmap a la izquierda y pestanas
-de trabajo a la derecha. Sirve para:
-
-- Cargar un CSV de altura del profilometro.
-- Ajustar el rango visual del heightmap.
-- Colocar puntos manualmente sobre el mapa y asignarles coordenadas reales de
-  Samlight/laser.
-- Calcular la calibracion afin perfilometro -> Samlight con esos puntos.
-- Generar un DXF de cruces de calibracion.
-- Seleccionar un perfil entre dos puntos, ver la altura y generar DXF por
-  niveles/capas/pines.
-- Anadir o quitar niveles de altura para el DXF.
-- Seleccionar un perfil de 1 mm para COMSOL y exportarlo como CSV/TXT `x_mm,y_mm`.
-
-La herramienta `interfazmejorada.py` sigue disponible, pero ahora mismo no es
-el flujo principal:
+Install into your Python 3.11 environment:
 
 ```powershell
-python .\interfazmejorada.py
+pip install PySide6 pyqtgraph numpy scipy
 ```
 
-Su objetivo es el flujo final deseado: dada una pieza, seleccionar un area,
-filtrar picos por bandas de altura y generar nodos/rellenos para Samlight. Pero
-por ahora no lo usamos como herramienta principal porque aparecieron problemas
-de referencia/origen/offset y algunas salidas quedaban descuadradas respecto a
-la realidad. Hasta resolver completamente esa referencia global, para trabajo
-fiable usamos `interfaz_calibracion_manual_qt.py`.
+> **Important:** Use the Python 3.11 executable directly or the `.bat` launchers provided.
+> Anaconda's default `python` ships pyqtgraph < 0.13 which crashes on startup.
 
-La version Matplotlib queda como referencia antigua:
+---
 
-```powershell
-python .\interfaz_calibracion_manual.py .\mi_archivo.csv
-```
-
-## Estructura Del Proyecto
+## Project Structure
 
 ```text
-laser_correction/
-  interfazmejorada.py
-  README.md
+laser_correction_marking-main/
+  interfaz_calibracion_manual_qt.py   ← main calibration & DXF tool
+  compare_heights.py                  ← PRE/POST alignment pipeline (no GUI)
+  perfil_interactivo.bat              ← launcher for compare_perfil_interactivo
 
-  csv_entrada/
-    test2.csv
-    prueba1_recto_template.csv
-
-  calibracion/
-    calibracion_test2.csv
-    plantilla_calibracion_con_origen.csv
-    plantilla_marcas_calibracion.csv
-    plantilla_puntos_referencia.csv
-    plantilla_repetibilidad.csv
-
+  csv_entrada/                        ← input heightmap CSVs from profilometer
+  calibracion/                        ← saved calibration files
   salidas/
-    dxf/
-    csv/
-    imagenes/
+    dxf/                              ← exported DXF files for SAMLight
+    csv/                              ← exported profile CSVs
+    imagenes/                         ← exported PNG captures
 
-  referencias/
-    prueba.PNG
-
-  documentacion/
-    protocolo_referencia_samlight.md
-
-  archivo_viejo/
-    20260625_limpieza/
+  comparacion_experimento1/
+    compare_perfil_interactivo.py     ← interactive PRE/POST profile comparator
+    perfil_interactivo.bat            ← launcher using Python 3.11
+    compare_heights.py                ← alignment pipeline (shared)
+    parte_1/ parte_2/ parte_3/ ...    ← per-experiment input CSVs
+    resultados/                       ← comparison outputs
 ```
 
-## Uso De Interfazmejorada
+---
 
-Esta seccion documenta `interfazmejorada.py`, pero no es el flujo principal
-actual. Esta herramienta queda como objetivo/futuro para procesar areas
-completas cuando resolvamos del todo la referencia global.
+## Tool 1 — `interfaz_calibracion_manual_qt.py`
 
-1. Mete el CSV del profilometro en `csv_entrada/`.
-2. Mete o edita el CSV de calibracion en `calibracion/`.
-3. Ejecuta:
+**Purpose:** Load a heightmap CSV, place calibration points by clicking on the map,
+compute the profilometer → SAMLight affine transform, and export DXF correction
+trajectories by height level.
+
+### Launch
 
 ```powershell
-python .\interfazmejorada.py
+C:\Users\mss\AppData\Local\Programs\Python\Python311\python.exe .\interfaz_calibracion_manual_qt.py .\csv_entrada\prueba1_steel_Height.csv
 ```
 
-Por defecto lee:
-
-```text
-csv_entrada/test2.csv
-calibracion/calibracion_test2.csv
-```
-
-Tambien puedes indicar archivos concretos:
+You can also reload a previously saved calibration:
 
 ```powershell
-python .\interfazmejorada.py .\csv_entrada\mi_pieza.csv .\calibracion\mi_calibracion.csv
+python .\interfaz_calibracion_manual_qt.py .\csv_entrada\prueba1.csv .\calibracion\calibracion_manual_prueba1_20260629_120000.csv
 ```
 
-Si pasas solo el nombre del CSV, tambien lo buscara dentro de `csv_entrada/`:
+### Window Layout
+
+The window opens as a single panel:
+- **Left (large):** interactive heightmap — clickable, zoomable, pannable.
+- **Right:** three tabs + status log at the bottom.
+
+---
+
+### Tab 1 — Heightmap
+
+Adjust the colour range to bring out the surface detail you care about.
+
+| Control | What it does |
+|---|---|
+| **Min (µm) / Max (µm)** spinboxes | Set exact colour limits |
+| **Min / Max sliders** | Fast visual sweep of the range |
+
+The colour map goes blue (low) → green → yellow → red (high).
+Changing these values never touches the DXF or calibration — display only.
+
+---
+
+### Tab 2 — Calibration / DXF
+
+This is the main working tab. No origin pixel needs to be defined; the calibration
+is entirely defined by point pairs (profilometer location ↔ SAMLight coordinate).
+
+#### Step-by-step workflow
+
+1. **Enter the SAMLight coordinates** of the first point:
+   - Fill in **ID**, **X SAMLight (mm)**, **Y SAMLight (mm)**.
+
+2. **Click "Nuevo punto"** — the cursor changes to a crosshair.
+   Click on the corresponding peak or mark on the heightmap.
+   The point appears as a coloured circle with its ID label.
+
+3. **Repeat** for at least 3 points (5+ spread across the surface gives a more
+   robust affine transform). You can **drag** any point on the map to fine-tune
+   its position.
+
+4. The **calibration error table** (columns: ID, X laser, Y laser, X perfil,
+   Y perfil, err µm) updates live. The residual error per point is shown in µm.
+
+5. **"Guardar calib."** saves two files to `calibracion/`:
+   - `calibracion_manual_{stem}_{timestamp}.csv` — reloadable by this tool
+   - `calibracion_affine_{stem}_{timestamp}.csv` — compatible with `interfazmejorada.py`
+
+6. **"DXF cruces"** exports a DXF with 0.5 × 0.5 mm crosses centred at each
+   SAMLight coordinate you entered — useful for verifying alignment by burning
+   test marks.
+
+#### Profile between two points
+
+7. Select **Perfil A** and **Perfil B** from the dropdowns (populated from your
+   calibration points), then click **"Ver perfil"**.
+   The height profile between those two points appears in the plot below.
+
+8. **Height levels** (N2 / N3 / N4 by default) define the threshold bands for the
+   DXF. You can **"Añadir nivel"** or **"Quitar ultimo"** to change the number of
+   layers. Each level maps to one DXF layer / SAMLight pin:
+
+   | Level | DXF layer | SAMLight pin |
+   |---|---|---|
+   | N2 | `PIN_1_NIVEL_2` | PIN 1 |
+   | N3 | `PIN_2_NIVEL_3` | PIN 2 |
+   | N4 | `PIN_3_NIVEL_4` | PIN 3 |
+
+9. **"Exportar DXF perfil"** / **"Exportar CSV perfil"** write the profile
+   trajectory to `salidas/dxf/` and `salidas/csv/` respectively.
+   The exported CSV includes both coordinate systems:
+   `distance_mm, height_mm, level, x_profile_mm, y_profile_mm, x_samlight_mm, y_samlight_mm`
+
+> **DXF import note:** import into SAMLight at 1:1, no auto-centering, no scaling,
+> no "fit to field". The coordinates are already in SAMLight mm.
+
+---
+
+### Tab 3 — COMSOL
+
+Extract a 1D height profile for finite-element simulation input (no Matplotlib needed).
+
+| Control | What it does |
+|---|---|
+| **Longitud mm** | Length of the profile segment (default 1.000 mm) |
+| **Puntos perfil** | Number of sample points along the segment |
+| **"Marcar inicio"** | Click on the heightmap to set the start point (x = 0) |
+| **"Marcar fin"** | Click to set the direction; endpoint is snapped to the exact length |
+| **"Ver COMSOL"** | Plots the interpolated height profile |
+| **"COMSOL CSV"** | Saves `salidas/csv/Perfil_COMSOL_{stem}_{timestamp}.csv` (x_mm, y_mm) |
+| **"COMSOL TXT"** | Saves `salidas/txt/Perfil_COMSOL_{stem}_{timestamp}.txt` (two columns, no header) |
+
+Both endpoints are shown as orange handles on the map and can be dragged.
+The TXT format is the simplest for direct COMSOL table/interpolation import.
+
+---
+
+### Status Log
+
+The bottom-right panel shows all operations, calibration residuals, file paths
+saved, and any warnings. Read it to confirm exports completed successfully.
+
+---
+
+### Output File Summary — `interfaz_calibracion_manual_qt.py`
+
+| Output | Location | Description |
+|---|---|---|
+| `calibracion_manual_{stem}_{ts}.csv` | `calibracion/` | Reloadable calibration point pairs |
+| `calibracion_affine_{stem}_{ts}.csv` | `calibracion/` | Affine matrix for `interfazmejorada.py` |
+| `Cruces_{stem}_{ts}.dxf` | `salidas/dxf/` | DXF crosses at SAMLight coordinates |
+| `Perfil_{stem}_{ts}.dxf` | `salidas/dxf/` | DXF height-level trajectory |
+| `Perfil_{stem}_{ts}.csv` | `salidas/csv/` | Profile with both coordinate systems |
+| `Perfil_COMSOL_{stem}_{ts}.csv` | `salidas/csv/` | COMSOL profile (x_mm, height_mm) |
+| `Perfil_COMSOL_{stem}_{ts}.txt` | `salidas/txt/` | COMSOL profile (plain two-column) |
+
+---
+
+---
+
+## Tool 2 — `compare_perfil_interactivo.py`
+
+**Purpose:** Interactively compare height profiles between a PRE-correction and
+POST-correction scan. Click two points on the DELTA map to extract a cross-section;
+multiple profiles can be overlaid simultaneously.
+
+### Launch
+
+Use the provided batch file (it calls Python 3.11 automatically):
+
+```bat
+comparacion_experimento1\perfil_interactivo.bat <pre.csv> <post.csv>
+```
+
+Example:
+
+```bat
+comparacion_experimento1\perfil_interactivo.bat csv_entrada\prueba1_steel_Height.csv csv_entrada\postlinea1_steel_Height.csv
+```
+
+Optional output directory:
+
+```bat
+perfil_interactivo.bat pre.csv post.csv --out resultados\experimento1\
+```
+
+Or call Python 3.11 directly:
 
 ```powershell
-python .\interfazmejorada.py mi_pieza.csv
+C:\Users\mss\AppData\Local\Programs\Python\Python311\python.exe comparacion_experimento1\compare_perfil_interactivo.py pre.csv post.csv
 ```
 
-## Ventanas De Interfazmejorada
+---
 
-La aplicacion abre dos ventanas.
+### Alignment Pipeline
 
-### 1. Height Range
+On startup the tool automatically aligns PRE and POST:
 
-Sirve para ajustar solo la visualizacion del mapa de altura.
+1. **Coarse + fine Phase-Only Correlation (POC)** — sub-pixel lateral shift between scans.
+2. **In-plane rotation search** — corrects small angular misalignment.
+3. **Z-offset (`dZ`)** — global height offset between the two scans.
+4. **Tilt correction** — removes residual X/Y tilt from the POST scan.
 
-- `Min color`: altura minima del color.
-- `Max color`: altura maxima del color.
-- El cero queda centrado en verde.
-- Negativo va a azul.
-- Positivo va a amarillo/naranja/rojo.
+The overlap region (pixels present in both scans after alignment) is the working area.
+Alignment parameters are printed to the console: `Y, X shift`, `dZ`, `RMS delta`.
 
-Esto no cambia el DXF directamente; solo ayuda a ver la pieza.
+---
 
-### 2. Nodos
+### SAMLight Coordinate Calibration (Automatic)
 
-Sirve para crear las bandas de altura que se exportaran.
+The tool converts click positions on the map to SAMLight mm so that profiles can be
+positioned exactly as in the calibration interface.
 
-- `N4 Negro`: picos mas altos.
-- `N3 Rosa`: banda intermedia.
-- `N2 Verde`: banda baja.
+Calibration is detected **automatically** — no `--cal` argument needed:
 
-Controles de teclado:
+1. Looks for `calibracion/calibracion_manual_{pre_stem}_*.csv`
+   (saved by `interfaz_calibracion_manual_qt.py` → "Guardar calib.").
+2. If not found, looks for `salidas/csv/Perfil_{pre_stem}_*.csv`
+   (a profile CSV exported from the calibration interface — it contains both
+   coordinate systems in its columns, so the two endpoints give a full
+   similarity transform: scale + rotation + translation).
+
+If neither is found, profile positions are shown in profilometer coordinates
+(still correct for measuring lengths and comparing heights).
+
+---
+
+### Window Layout
+
+```
+┌─────────────────────────────┬─────────────────────────────────┐
+│                             │  Profile 1  [X]                 │
+│   DELTA MAP (clickable)     │  ┌──────────────────────────┐   │
+│                             │  │ PRE vs POST heights (mm) │   │
+│   Click P1 → click P2       │  └──────────────────────────┘   │
+│   to extract a profile      │  ┌──────────────────────────┐   │
+│                             │  │ Delta (µm) fill chart    │   │
+│   [Map mode dropdown]       │  └──────────────────────────┘   │
+│   [Delete all] [Save all]   │  Profile 2  [X]                 │
+│                             │  ...                            │
+└─────────────────────────────┴─────────────────────────────────┘
+  Status bar: x_profile_mm, y_profile_mm   (or x_samlight_mm if calibrated)
+```
+
+---
+
+### How to Add a Profile
+
+1. The map starts in **DELTA** mode (POST − PRE after alignment, in µm).
+   You can switch to **PRE** or **POST** view using the dropdown.
+
+2. **Left-click** on the first point (P1) — a green marker appears and the
+   status bar shows the coordinates.
+
+3. **Left-click** on the second point (P2) — the profile is immediately computed
+   and a card appears in the right panel.
+
+   > Tip: slight mouse movement during a click is handled correctly — both pure
+   > clicks and very short drags register as point selections.
+
+4. Repeat for as many profiles as needed. Each profile gets a distinct colour
+   (red, blue, green, purple, orange, …).
+
+---
+
+### Profile Card
+
+Each profile card shows:
+
+- **Top plot:** height in mm for PRE (solid) and POST (dashed) along the profile
+  distance axis.
+- **Bottom plot:** delta = POST − PRE in µm, with positive excursions filled red
+  and negative excursions filled blue.
+- **[X] button:** removes that individual profile from the map and the panel.
+
+---
+
+### Toolbar Buttons
+
+| Button | Action |
+|---|---|
+| Map mode dropdown | Switch between DELTA / PRE / POST display |
+| **Borrar todos** | Remove all profiles |
+| **Guardar todos** | Export all profile cards as PNG to the output folder |
+
+---
+
+### Output Files — `compare_perfil_interactivo.py`
+
+Saved to the `--out` directory (default: `comparacion_experimento1/resultados/`):
 
 ```text
-4 / 3 / 2              selecciona el nivel activo
-flecha arriba/abajo    cambia el umbral +/- 0.001 mm
-flecha derecha/izq.    cambia el umbral +/- 0.010 mm
+Perfil_1_{timestamp}.png
+Perfil_2_{timestamp}.png
+...
 ```
 
-Botones:
+---
 
-```text
-Marcar origen   permite hacer click en el cruce fisico de las lineas
-Marcar area     permite hacer 4 clicks para definir el area de actuacion
-Borrar area     elimina el area y vuelve a procesar todo el scan
-Exportar CSV    guarda datos de nodos en salidas/csv/
-Exportar DXF    guarda trayectorias Samlight en salidas/dxf/
+### Coordinate Convention
+
+Both tools share the same coordinate system derived from the profilometer CSV:
+
+```
+x ∈ [col_offset × px,  (col_offset + ncols) × px]      (mm, left to right)
+y ∈ [-(row_offset + nrows) × px,  -row_offset × px]     (mm, top is negative)
 ```
 
-Antes de exportar un DXF desde el heightmap, marca el origen si el cruce de
-las lineas no coincide exactamente con el pixel `(0,0)` del CSV. Si no se marca
-o no se define en el CSV de calibracion, el script asume que el origen fisico
-esta en la esquina superior izquierda del archivo, lo que produce un offset.
+Where `px` is the pixel size read from the CSV header (`XY Calibration` field ÷ 1000).
+This matches the axis labels in `interfaz_calibracion_manual_qt.py` exactly, so
+coordinates can be copied between the two tools.
 
-Si no marcas area, se exporta todo el scan. Si marcas area, solo se exporta lo que cae dentro del poligono.
+---
 
-## Salidas
+## Calibration File Format
 
-Los archivos generados se guardan automaticamente aqui:
-
-```text
-salidas/dxf/       DXF para Samlight
-salidas/csv/       CSV de nodos y coordenadas
-salidas/imagenes/  captura PNG de la ventana de nodos
-```
-
-Los nombres incluyen el nombre del CSV de entrada y la fecha:
-
-```text
-Nodos_Samlight_test2_YYYYMMDD_HHMMSS.dxf
-Niveles_Nodos_test2_YYYYMMDD_HHMMSS.csv
-Figura_Nodos_test2_YYYYMMDD_HHMMSS.png
-```
-
-## Calibracion Manual Por Puntos Reales Del Laser
-
-La herramienta nueva es:
-
-```powershell
-python .\interfaz_calibracion_manual.py .\pretest5.csv
-```
-
-Version rapida recomendada:
-
-```powershell
-python .\interfaz_calibracion_manual_qt.py .\pretest5.csv
-```
-
-Para abrir directamente `test5.csv`:
-
-```powershell
-python .\interfaz_calibracion_manual_qt.py .\csv_entrada\test5.csv
-```
-
-Tambien puedes cargar una calibracion manual guardada:
-
-```powershell
-python .\interfaz_calibracion_manual.py .\pretest5.csv .\calibracion\calibracion_manual_pretest5_YYYYMMDD_HHMMSS.csv
-```
-
-Flujo:
-
-La version Qt se abre en una sola ventana: pieza/heightmap a la izquierda y
-pestanas de trabajo a la derecha.
-
-Nota importante: en esta herramienta no se define origen. Cada punto marcado
-en el heightmap se empareja con su coordenada real de Samlight, y con esos pares
-se calcula la transformacion. Con 3 puntos ya hay transformacion afin; con 5 o
-mas puntos repartidos suele ser mas robusta.
-
-1. En la pestana `Heightmap`, ajusta el `height range` con los sliders `Min` y `Max`.
-   Tambien puedes escribir valores exactos en `Min exacto` y `Max exacto`.
-2. En `Calibracion / DXF`, escribe `ID`, `X`, `Y` reales del laser/Samlight.
-3. Pulsa `Nuevo punto` y haz click sobre el punto correspondiente del heightmap.
-4. Puedes arrastrar cualquier punto para corregirlo.
-5. Con 3 o mas puntos se calcula una transformacion afin perfilometro -> Samlight.
-6. `DXF cruces` genera cruces de `0.5 x 0.5 mm` centradas en las coordenadas reales introducidas.
-7. Escribe dos IDs en `Perfil A` y `Perfil B`, pulsa `Ver perfil`, ajusta niveles de altura y exporta el DXF.
-
-Los niveles empiezan como `N2`, `N3` y `N4`, pero puedes usar `Anadir nivel`
-o `Quitar ultimo`. Cada nivel exportado crea una capa/pin independiente en el
-DXF.
-
-### Perfil 2D Para COMSOL
-
-En la pestana `COMSOL` de `interfaz_calibracion_manual_qt.py` puedes sacar un
-perfil 2D `x,y` sin usar Matplotlib:
-
-1. Ajusta el height range para ver bien la zona.
-2. En `Longitud COMSOL mm`, deja `1.000000` para un segmento de 1 mm.
-3. Pulsa `Marcar inicio` y haz click en el primer punto del perfil.
-   Ese punto se exporta como `x=0`.
-4. Pulsa `Marcar fin` y haz click hacia el extremo/direccion del segmento.
-   La herramienta fuerza el extremo a la longitud exacta indicada, por ejemplo
-   `x=1 mm`.
-5. Puedes arrastrar los dos puntos naranjas sobre el heightmap.
-6. Pulsa `Ver COMSOL` para ver el perfil.
-7. Exporta con `COMSOL CSV` o `COMSOL TXT`.
-
-Salidas:
-
-```text
-salidas/csv/Perfil_COMSOL_...csv   columnas x_mm,y_mm con cabecera
-salidas/txt/Perfil_COMSOL_...txt   dos columnas sin cabecera
-```
-
-El `TXT` es el formato mas simple para importar como tabla/interpolacion en
-COMSOL. La primera columna va siempre de `0` a la longitud indicada y la segunda
-columna es la altura en mm.
-
-El DXF del perfil se genera como recta por tramos de altura y separa capas/pines:
-
-```text
-PIN_1_NIVEL_2
-PIN_2_NIVEL_3
-PIN_3_NIVEL_4
-```
-
-Para evitar trazos absurdamente pequenos, la herramienta ignora tramos menores
-que el diametro aproximado del haz:
-
-```text
-BEAM_DIAMETER_MM = 0.055
-```
-
-Al guardar calibracion, se crean dos archivos:
-
-- `calibracion_manual_...csv`: editable y recargable por esta herramienta.
-- `calibracion_affine_...csv`: compatible con `interfazmejorada.py` en modo `affine` para futuros DXF.
-
-## DXF Para Samlight
-
-El DXF se exporta ya en coordenadas Samlight corregidas.
-
-Cada pixel/nodo pasa por:
-
-```text
-pixel del profilometro -> coordenada scanner mm -> coordenada Samlight mm
-```
-
-El DXF no debe importarse en Samlight con auto-centrado, auto-escalado ni "fit to field". Debe importarse 1:1 en mm.
-
-Capas actuales:
-
-```text
-PIN_1_NIVEL_2
-PIN_2_NIVEL_3
-PIN_3_NIVEL_4
-```
-
-Cada capa puede asignarse a un pin/proceso distinto en Samlight.
-
-El DXF no exporta solo contornos. Exporta lineas internas de relleno dentro de cada nodo. La separacion entre lineas se controla en `interfazmejorada.py`:
-
-```python
-DXF_HATCH_SPACING_MM = 0.025
-```
-
-Valores tipicos:
-
-```text
-0.015 mm  mas denso
-0.025 mm  normal
-0.050 mm  menos denso
-```
-
-## Calibracion
-
-La calibracion se lee desde un CSV como:
+Files saved by the calibration interface (`calibracion/calibracion_manual_*.csv`):
 
 ```csv
-id,x_scanner_rel_mm,y_scanner_rel_mm,x_samlight_mm,y_samlight_mm,use_for_affine,origin_x_px,origin_y_px,profile_x_sign,profile_y_sign,origin_samlight_x_mm,origin_samlight_y_mm
-T1,4.331,-4.493,-55,35,yes,0,0,1,-1,-59.551,39.559
-T2,14.347,-4.497,-45,35,yes,,,,,,
-T3,4.283,-14.531,-55,25,yes,,,,,,
+id,x_profile_mm,y_profile_mm,x_samlight_mm,y_samlight_mm,use_for_affine,...
+P1,4.064494,-3.143519,-50.006488,-0.000709,yes,...
+P2,2.100000,-4.500000,-51.900000,-1.200000,yes,...
 ```
 
-Columnas:
+- **`use_for_affine`**: set to `no` to exclude a point from the transform while keeping it as a reference.
+- At least **3 non-collinear points** are needed for the full affine transform.
+- The `compare_perfil_interactivo.py` tool only needs **2 points** (it uses a similarity
+  transform — scale + rotation + translation — which is sufficient for well-calibrated scans).
 
-```text
-id                  nombre del punto
-x_scanner_rel_mm    coordenada X medida en el profilometro/scanner
-y_scanner_rel_mm    coordenada Y medida en el profilometro/scanner
-x_samlight_mm       coordenada X ordenada/esperada en Samlight
-y_samlight_mm       coordenada Y ordenada/esperada en Samlight
-use_for_affine      yes/no para usar o ignorar el punto
-origin_x_px         pixel X del origen fisico en el CSV del profilometro
-origin_y_px         pixel Y del origen fisico en el CSV del profilometro
-profile_x_sign      normalmente 1
-profile_y_sign      1 si Y crece hacia abajo; -1 si quieres Y negativa hacia abajo
-origin_samlight_x_mm coordenada X Samlight del origen fisico
-origin_samlight_y_mm coordenada Y Samlight del origen fisico
+---
+
+## Typical Full Workflow
+
+```
+1. Scan PRE  →  profilometer CSV  →  csv_entrada/prueba1_steel_Height.csv
+2. Run interfaz_calibracion_manual_qt.py with the PRE CSV
+   → Place 3–5 calibration points, save calibration
+   → (Optional) export DXF crosses, verify alignment on part
+3. Apply laser correction in SAMLight
+4. Scan POST  →  csv_entrada/postlinea1_steel_Height.csv
+5. Run compare_perfil_interactivo.bat with PRE + POST CSVs
+   → Tool auto-detects calibration from step 2
+   → Click profiles across corrected lines to verify depth/shape
+   → Save PNG exports
 ```
 
-Se necesitan al menos 3 puntos activos para validar la calibracion y, si dejas
-`origin_samlight_x_mm/origin_samlight_y_mm` vacios, estimar el origen como:
+---
 
-```text
-origen_samlight = media(Samlight_medido - desplazamiento_scanner)
-```
+## Legacy Tools
 
-En el modo actual no se aplica rotacion ni cambio de signo escondido: se usa
-`Samlight = origen_samlight + dx/dy`.
+| File | Status | Notes |
+|---|---|---|
+| `interfazmejorada.py` | Available, not primary | Full-area node extraction; had origin/offset issues |
+| `interfaz_calibracion_manual.py` | Old (Matplotlib) | Replaced by the Qt version |
 
-Para una pieza nueva, lo recomendable es usar 4 o 5 marcas repartidas en la zona util.
-
-### Origen
-
-El origen tambien se define por pieza en el CSV de calibracion.
-
-La opcion recomendada es usar:
-
-```text
-origin_x_px
-origin_y_px
-```
-
-Estos son los pixeles del CSV/imagen del profilometro donde esta el origen fisico, por ejemplo el cruce de las lineas del soporte. Solo hace falta ponerlos en una fila; normalmente en la primera.
-
-Con ese origen, el script convierte cualquier pixel asi:
-
-```text
-dx = (x_px - origin_x_px) * pixel_size * profile_x_sign
-dy = (y_px - origin_y_px) * pixel_size * profile_y_sign
-```
-
-Y luego exporta a Samlight asi:
-
-```text
-X_samlight = origin_samlight_x_mm + dx
-Y_samlight = origin_samlight_y_mm + dy
-```
-
-No hay cambio de signo escondido en la suma final. Si quieres que un desplazamiento en Y sea negativo, lo defines con `profile_y_sign=-1` o introduces `dy` negativo en tus marcas.
-
-Tambien se puede definir el origen directamente en mm crudos con:
-
-```text
-origin_x_mm
-origin_y_mm
-```
-
-No mezcles `origin_x_px/origin_y_px` con `origin_x_mm/origin_y_mm` en el mismo archivo.
-
-## Que Cambiar Para Otra Pieza
-
-1. Copia el nuevo CSV del profilometro a `csv_entrada/`.
-2. Crea una nueva calibracion en `calibracion/`, por ejemplo:
-
-```text
-calibracion/mi_pieza_calibracion.csv
-```
-
-3. En ese CSV pon las marcas medidas:
-
-```text
-origin_x_px/origin_y_px del origen fisico de esa pieza
-scanner X/Y reales medidos respecto a ese origen
-Samlight X/Y que se ordenaron al laser
-```
-
-4. Ejecuta:
-
-```powershell
-python .\interfazmejorada.py .\csv_entrada\mi_pieza.csv .\calibracion\mi_pieza_calibracion.csv
-```
-
-5. Ajusta el height range para visualizar.
-6. Pulsa `Marcar origen` y haz click en el cruce fisico de las lineas si no esta ya definido en la calibracion.
-7. Ajusta N2/N3/N4 hasta que los nodos representen bien los picos.
-8. Marca el area de actuacion con 4 clicks si no quieres procesar todo el scan.
-9. Exporta CSV y DXF.
-10. Importa el DXF en Samlight 1:1, sin centrar ni escalar.
-
-## Archivos Viejos
-
-Los prototipos HTML/JS/BAT, DXF antiguos y salidas antiguas se guardaron en:
-
-```text
-archivo_viejo/20260625_limpieza/
-```
-
-No se han borrado; simplemente se han apartado para que no se confundan con el flujo actual.
+Old prototypes and outputs were archived to `archivo_viejo/20260625_limpieza/`.

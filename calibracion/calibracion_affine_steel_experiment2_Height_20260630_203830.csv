@@ -1,0 +1,8 @@
+id,x_scanner_rel_mm,y_scanner_rel_mm,x_samlight_mm,y_samlight_mm,use_for_affine,origin_x_px,origin_y_px,profile_x_sign,profile_y_sign,origin_samlight_x_mm,origin_samlight_y_mm,transform_mode
+P1,0.440364,-0.471885,-54.000000,16.500000,yes,0,0,1,-1,,,affine
+P2,4.422786,-2.912141,-50.000000,14.000000,yes,,,,,,,
+P3,3.921741,-0.428050,-50.500000,16.500000,yes,,,,,,,
+P4,7.389245,-0.393548,-47.000000,16.500000,yes,,,,,,,
+P5,6.421476,-4.870238,-48.000000,12.000000,yes,,,,,,,
+P6,0.447494,-2.946208,-54.000000,14.000000,yes,,,,,,,
+P7,0.454617,-5.435117,-54.000000,11.500000,yes,,,,,,,

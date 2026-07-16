@@ -1,0 +1,30 @@
+﻿Parametro,Valor,Unidad
+PRE,17-4 PH Region 2_Height,
+POST,17-4PH_Region2_Pass1_Height,
+---ALINEACION---,,
+Y shift (POST en PRE),0.000,mm
+X shift (POST en PRE),0.000,mm
+Confianza alineacion,1.000,
+SNR alineacion,27.41,
+Solapamiento,94.5,%
+theta_x,-0.0045,deg
+theta_y,-0.0029,deg
+R2 rotacion,0.0049,
+Correccion rotacion,NO,
+---Z OFFSET---,,
+dZ global (POST-PRE),0.000,um
+---DIFERENCIAS GLOBALES---,,
+Puntos validos,2585748,px
+Area analisis,360.8944,mm2
+Media diff,0.0159,um
+Std diff,7.1732,um
+RMS diff,7.1733,um
+---ABLACION (POST < PRE)---,,
+Area ablacion,87.6347,mm2
+Prof. max ablacion,-60.0000,um
+Media ablacion,-10.7827,um
+Volumen ablacion,0.944935,mm3
+---DEPOSICION (POST > PRE)---,,
+Area deposicion,95.8883,mm2
+Alt. max deposicion,53.0000,um
+Volumen deposicion,0.838430,mm3

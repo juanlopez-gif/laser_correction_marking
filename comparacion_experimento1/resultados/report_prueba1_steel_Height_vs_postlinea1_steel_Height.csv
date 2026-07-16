@@ -1,0 +1,31 @@
+﻿Parametro,Valor,Unidad
+PRE,prueba1_steel_Height,
+POST,postlinea1_steel_Height,
+---ALINEACION---,,
+Y shift (POST en PRE),0.004,mm
+X shift (POST en PRE),0.011,mm
+Confianza alineacion,1.000,
+SNR alineacion,41.96,
+Solapamiento,99.9,%
+theta_x,0.0055,deg
+theta_y,-0.0041,deg
+R2 rotacion,0.0049,
+Correccion rotacion,NO,
+Rotacion en plano,+0.000,deg
+---Z OFFSET---,,
+dZ global (POST-PRE),0.000,um
+---DIFERENCIAS GLOBALES---,,
+Puntos validos,2781793,px
+Area analisis,38.2064,mm2
+Media diff,0.0381,um
+Std diff,3.1197,um
+RMS diff,3.1199,um
+---ABLACION (POST < PRE)---,,
+Area ablacion,4.3960,mm2
+Prof. max ablacion,-55.4183,um
+Media ablacion,-8.3533,um
+Volumen ablacion,0.036722,mm3
+---DEPOSICION (POST > PRE)---,,
+Area deposicion,3.8939,mm2
+Alt. max deposicion,42.6017,um
+Volumen deposicion,0.029837,mm3

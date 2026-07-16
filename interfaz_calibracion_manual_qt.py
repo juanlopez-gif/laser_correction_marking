@@ -1,3 +1,4 @@
+
 import csv
 import sys
 from dataclasses import dataclass
@@ -7,6 +8,15 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
+
+try:
+    import pyvista as pv
+    from pyvistaqt import QtInteractor
+    HAS_PYVISTA = True
+except ImportError:
+    HAS_PYVISTA = False
+    print("[INFO] pyvistaqt no instalado — modo 3D no disponible. "
+          "Instala con:  pip install pyvistaqt vtk")
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,7 +52,27 @@ LEVEL_STYLE_COLORS = [
     (80, 80, 80),
 ]
 
-DXF_COLOR_CODES = ["3", "6", "1", "4", "30", "5", "8"]
+DXF_COLOR_CODES = ["3", "6", "1", "4", "30", "5", "8", "30", "3", "4", "6", "5", "6", "4"]
+
+SAMLIGHT_PEN_RGB = {
+    1: (255, 0, 0),
+    2: (0, 255, 0),
+    3: (0, 0, 255),
+    4: (0, 128, 255),
+    5: (255, 170, 0),
+    6: (0, 170, 170),
+    7: (85, 85, 85),
+    8: (255, 85, 0),
+    9: (0, 170, 0),
+    10: (255, 255, 0),
+    11: (255, 0, 255),
+    12: (0, 0, 85),
+    13: (255, 170, 255),
+    14: (170, 225, 255),
+}
+
+DEFAULT_CALIBRATION_CROSSES_PEN = 4
+DEFAULT_WORK_CROSSES_PEN = 6
 
 HEIGHT_LUT_POSITIONS = np.array([0.00, 0.35, 0.50, 0.68, 0.82, 1.00], dtype=float)
 HEIGHT_LUT_COLORS = np.array([
@@ -63,6 +93,16 @@ class ControlPoint:
     samlight_x_mm: float
     samlight_y_mm: float
     use_for_affine: bool = True
+
+
+@dataclass
+class WorkPoint:
+    point_id: str
+    profile_x_mm: float
+    profile_y_mm: float
+    samlight_x_mm: float
+    samlight_y_mm: float
+    use_for_affine: bool = False
 
 
 def clean_cell(value):
@@ -168,6 +208,56 @@ def add_dxf_line(lines, layer, color, x0, y0, x1, y1):
     ])
 
 
+def svg_rgb_for_config(cfg):
+    if "rgb" in cfg:
+        return tuple(cfg["rgb"])
+    pin = str(cfg.get("pin", ""))
+    if pin.startswith("PIN_"):
+        try:
+            return SAMLIGHT_PEN_RGB.get(int(pin.split("_", 1)[1]), (0, 0, 0))
+        except ValueError:
+            pass
+    return (0, 0, 0)
+
+
+def svg_escape(value):
+    return (str(value).replace("&", "&amp;")
+                      .replace('"', "&quot;")
+                      .replace("<", "&lt;")
+                      .replace(">", "&gt;"))
+
+
+def write_svg_lines(path, segments):
+    if not segments:
+        return
+    xs = [float(v) for seg in segments for v in (seg["x0"], seg["x1"])]
+    ys = [float(v) for seg in segments for v in (seg["y0"], seg["y1"])]
+    margin = 1.0
+    x_min = min(xs) - margin
+    x_max = max(xs) + margin
+    y_min = min(ys) - margin
+    y_max = max(ys) + margin
+    width = max(x_max - x_min, 0.001)
+    height = max(y_max - y_min, 0.001)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<svg xmlns="http://www.w3.org/2000/svg"',
+        f'     width="{width:.6f}mm" height="{height:.6f}mm"',
+        f'     viewBox="{x_min:.6f} {-y_max:.6f} {width:.6f} {height:.6f}">',
+        '  <g fill="none" stroke-width="0.02" stroke-linecap="round">',
+    ]
+    for seg in segments:
+        r, g, b = seg["rgb"]
+        lines.append(
+            f'    <line id="{svg_escape(seg["layer"])}" '
+            f'x1="{seg["x0"]:.6f}" y1="{-seg["y0"]:.6f}" '
+            f'x2="{seg["x1"]:.6f}" y2="{-seg["y1"]:.6f}" '
+            f'stroke="rgb({int(r)},{int(g)},{int(b)})" />'
+        )
+    lines.extend(["  </g>", "</svg>"])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 class CalibrationViewBox(pg.ViewBox):
     clicked = QtCore.Signal(float, float)
     dragStarted = QtCore.Signal(float, float)
@@ -219,6 +309,48 @@ class CalibrationViewBox(pg.ViewBox):
         super().mouseDragEvent(event, axis=axis)
 
 
+class WorkPointDialog(QtWidgets.QDialog):
+    def __init__(self, parent, default_id, profile_x, profile_y, samlight_x, samlight_y):
+        super().__init__(parent)
+        self.setWindowTitle("Confirmar punto de trabajo")
+        self.setMinimumWidth(340)
+        layout = QtWidgets.QFormLayout(self)
+
+        self._edit_id = QtWidgets.QLineEdit(default_id)
+        layout.addRow("ID", self._edit_id)
+        layout.addRow("Perfil X (mm)", QtWidgets.QLabel(f"{profile_x:.6f}"))
+        layout.addRow("Perfil Y (mm)", QtWidgets.QLabel(f"{profile_y:.6f}"))
+
+        def spin(val):
+            s = QtWidgets.QDoubleSpinBox()
+            s.setRange(-10000, 10000)
+            s.setDecimals(6)
+            s.setSingleStep(0.001)
+            s.setValue(val)
+            return s
+
+        self._spin_sx = spin(samlight_x)
+        self._spin_sy = spin(samlight_y)
+        layout.addRow("SAMLight X (mm)", self._spin_sx)
+        layout.addRow("SAMLight Y (mm)", self._spin_sy)
+
+        note = QtWidgets.QLabel("Las coords SAMLight se calculan de la calibración afín.\nPuedes editarlas si lo necesitas.")
+        note.setStyleSheet("color: #888; font-size: 10px;")
+        note.setWordWrap(True)
+        layout.addRow(note)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    def point_id(self):   return self._edit_id.text().strip() or "WP"
+    def samlight_x(self): return float(self._spin_sx.value())
+    def samlight_y(self): return float(self._spin_sy.value())
+
+
 class ManualCalibrationQt(QtWidgets.QMainWindow):
     def __init__(self, csv_file, calibration_file=None):
         super().__init__()
@@ -246,6 +378,12 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             3: self.level_n3,
             4: self.level_n4,
         }
+        self.level_pen_assignments = {
+            level: self.default_pen_for_level(level)
+            for level in self.level_thresholds
+        }
+        self.calibration_crosses_pen = DEFAULT_CALIBRATION_CROSSES_PEN
+        self.work_crosses_pen = DEFAULT_WORK_CROSSES_PEN
 
         self.points = []
         self.selected_index = None
@@ -263,6 +401,12 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.dragging_comsol_endpoint = None
         self.block_updates = False
         self.level_controls = {}
+        self._view_mode = '2d'
+        self._3d_actor = None
+        self.work_points = []
+        self.profile_list = []
+        self.work_point_items = []
+        self.adding_work_point = False
 
         self.point_scatter = None
         self.point_labels = []
@@ -301,7 +445,12 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.image_item.setRect(QtCore.QRectF(self.x_min, self.y_min, self.x_max - self.x_min, self.y_max - self.y_min))
         self.plot.setXRange(self.x_min, self.x_max, padding=0.01)
         self.plot.setYRange(self.y_min, self.y_max, padding=0.01)
-        main_layout.addWidget(self.plot, 4)
+        self.map_stack = QtWidgets.QStackedWidget()
+        self.map_stack.addWidget(self.plot)
+        if HAS_PYVISTA:
+            self._plotter = QtInteractor(self.map_stack)
+            self.map_stack.addWidget(self._plotter)
+        main_layout.addWidget(self.map_stack, 4)
 
         self.viewbox.clicked.connect(self.on_map_clicked)
         self.viewbox.dragMoved.connect(self.on_drag_moved)
@@ -315,6 +464,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self.make_height_tab(), "Heightmap")
         self.tabs.addTab(self.make_calibration_tab(), "Calibracion / DXF")
+        self.tabs.addTab(self.make_perfiles_tab(), "Perfiles")
         self.tabs.addTab(self.make_comsol_tab(), "COMSOL")
         side_layout.addWidget(self.tabs, 4)
         side_layout.addWidget(self.make_status_group(), 1)
@@ -336,11 +486,33 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
     def make_calibration_tab(self):
         content = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
         layout.addWidget(self.make_calibration_help_group())
         layout.addWidget(self.make_points_group(), 2)
-        layout.addWidget(self.make_dxf_profile_group(), 2)
+        layout.addWidget(self.make_work_points_group(), 1)
+        layout.addStretch(1)
+        return content
+
+    def make_perfiles_tab(self):
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        layout.addWidget(self.make_dxf_profile_group(), 3)
         layout.addWidget(self.make_levels_group())
-        return self.make_scroll_tab(content)
+        layout.addWidget(self.make_profile_list_group())
+        export_bar = QtWidgets.QHBoxLayout()
+        self.btn_export_bar_dxf = QtWidgets.QPushButton("⬇ Exportar DXF perfil")
+        self.btn_export_bar_csv = QtWidgets.QPushButton("⬇ Exportar CSV perfil")
+        self.btn_export_bar_dxf.setStyleSheet("font-weight:bold; background:#1a7abf; color:white; padding:6px;")
+        self.btn_export_bar_csv.setStyleSheet("font-weight:bold; background:#2e7d32; color:white; padding:6px;")
+        self.btn_export_bar_dxf.clicked.connect(self.export_profile_dxf)
+        self.btn_export_bar_csv.clicked.connect(self.export_profile_csv)
+        export_bar.addWidget(self.btn_export_bar_dxf)
+        export_bar.addWidget(self.btn_export_bar_csv)
+        layout.addLayout(export_bar)
+        return content
 
     def make_comsol_tab(self):
         content = QtWidgets.QWidget()
@@ -352,18 +524,59 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
     def make_height_group(self):
         group = QtWidgets.QGroupBox("Heightmap")
         layout = QtWidgets.QFormLayout(group)
-        self.spin_color_min = self.make_spin(self.color_min, self.z_min, self.z_max, decimals=6, step=0.001)
-        self.spin_color_max = self.make_spin(self.color_max, self.z_min, self.z_max, decimals=6, step=0.001)
+        zm, zM = self.z_min * 1000, self.z_max * 1000
+        self.spin_color_min = self.make_spin(self.color_min * 1000, zm, zM, decimals=2, step=0.5)
+        self.spin_color_max = self.make_spin(self.color_max * 1000, zm, zM, decimals=2, step=0.5)
         self.slider_color_min = self.make_slider(self.color_min)
         self.slider_color_max = self.make_slider(self.color_max)
         self.spin_color_min.valueChanged.connect(self.on_color_spin_changed)
         self.spin_color_max.valueChanged.connect(self.on_color_spin_changed)
         self.slider_color_min.valueChanged.connect(self.on_color_slider_changed)
         self.slider_color_max.valueChanged.connect(self.on_color_slider_changed)
-        layout.addRow("Min exacto", self.spin_color_min)
-        layout.addRow("Min barra", self.slider_color_min)
-        layout.addRow("Max exacto", self.spin_color_max)
-        layout.addRow("Max barra", self.slider_color_max)
+        row_min = QtWidgets.QHBoxLayout()
+        row_min.addWidget(self.spin_color_min)
+        row_min.addWidget(self.slider_color_min, 1)
+        row_max = QtWidgets.QHBoxLayout()
+        row_max.addWidget(self.spin_color_max)
+        row_max.addWidget(self.slider_color_max, 1)
+        layout.addRow("Min (µm)", row_min)
+        layout.addRow("Max (µm)", row_max)
+
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        layout.addRow(sep)
+
+        self._combo_view_mode = QtWidgets.QComboBox()
+        self._combo_view_mode.addItem("2D Heightmap")
+        if HAS_PYVISTA:
+            self._combo_view_mode.addItem("3D Surface (Keyence)")
+        else:
+            self._combo_view_mode.addItem("3D — instala: pip install pyvistaqt vtk")
+            self._combo_view_mode.model().item(1).setEnabled(False)
+        layout.addRow("Vista", self._combo_view_mode)
+
+        row_mag = QtWidgets.QHBoxLayout()
+        self._spin_height_mag = self.make_spin(1.0, 0.1, 500.0, decimals=1, step=0.5)
+        row_mag.addWidget(self._spin_height_mag)
+        for lbl, val in [("×1", 1.0), ("×10", 10.0), ("×50", 50.0), ("×100", 100.0)]:
+            btn = QtWidgets.QPushButton(lbl)
+            btn.setFixedWidth(38)
+            btn.clicked.connect(lambda _, v=val: self._spin_height_mag.setValue(v))
+            row_mag.addWidget(btn)
+        layout.addRow("Altura ×", row_mag)
+
+        self._combo_view_mode.currentTextChanged.connect(self._switch_view_mode)
+        self._spin_height_mag.valueChanged.connect(self._on_height_mag_changed)
+
+        self._lbl_3d_controls = QtWidgets.QLabel(
+            "🖱 Arrastrar = rotar  |  Shift+Arrastrar = pan  |  Scroll = zoom"
+        )
+        self._lbl_3d_controls.setStyleSheet("color: #888; font-size: 10px;")
+        self._lbl_3d_controls.setWordWrap(True)
+        self._lbl_3d_controls.setVisible(False)
+        layout.addRow(self._lbl_3d_controls)
+
         return group
 
     def make_points_group(self):
@@ -375,8 +588,8 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.spin_laser_x = self.make_spin(0.0, -10000, 10000, decimals=6, step=0.001)
         self.spin_laser_y = self.make_spin(0.0, -10000, 10000, decimals=6, step=0.001)
         form.addRow("ID", self.edit_point_id)
-        form.addRow("X laser real", self.spin_laser_x)
-        form.addRow("Y laser real", self.spin_laser_y)
+        form.addRow("X SAMLight (mm)", self.spin_laser_x)
+        form.addRow("Y SAMLight (mm)", self.spin_laser_y)
         layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -408,6 +621,14 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         layout.addLayout(buttons2)
         self.btn_save_cal.clicked.connect(self.save_calibration_points)
         self.btn_cross_dxf.clicked.connect(self.export_crosses_dxf)
+
+        pen_row = QtWidgets.QHBoxLayout()
+        self.combo_calibration_crosses_pen = self.make_pen_combo(self.calibration_crosses_pen)
+        pen_row.addWidget(QtWidgets.QLabel("Pen cruces calibracion"))
+        pen_row.addWidget(self.combo_calibration_crosses_pen, 1)
+        layout.addLayout(pen_row)
+        self.combo_calibration_crosses_pen.currentIndexChanged.connect(
+            lambda _idx: self.set_calibration_crosses_pen(self.combo_calibration_crosses_pen.currentData()))
         return group
 
     def make_calibration_help_group(self):
@@ -432,19 +653,22 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.combo_p1 = QtWidgets.QComboBox()
         self.combo_p2 = QtWidgets.QComboBox()
         self.btn_profile = QtWidgets.QPushButton("Ver perfil")
+        self.btn_add_to_list = QtWidgets.QPushButton("➕ Añadir a lista")
         top.addWidget(QtWidgets.QLabel("A"))
         top.addWidget(self.combo_p1)
         top.addWidget(QtWidgets.QLabel("B"))
         top.addWidget(self.combo_p2)
         top.addWidget(self.btn_profile)
+        top.addWidget(self.btn_add_to_list)
         layout.addLayout(top)
         self.btn_profile.clicked.connect(self.update_profile_from_controls)
+        self.btn_add_to_list.clicked.connect(self.add_profile_to_list)
 
         self.dxf_profile_plot = pg.PlotWidget()
         self.dxf_profile_plot.setBackground("w")
         self.dxf_profile_plot.showGrid(x=True, y=True, alpha=0.25)
         self.dxf_profile_plot.setLabel("bottom", "distancia", units="mm")
-        self.dxf_profile_plot.setLabel("left", "altura", units="mm")
+        self.dxf_profile_plot.setLabel("left", "altura", units="µm")
         self.dxf_profile_plot.setMinimumHeight(230)
         layout.addWidget(self.dxf_profile_plot, 1)
         self.profile_plot = self.dxf_profile_plot
@@ -457,6 +681,48 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         layout.addLayout(export_buttons)
         self.btn_export_profile_dxf.clicked.connect(self.export_profile_dxf)
         self.btn_export_profile_csv.clicked.connect(self.export_profile_csv)
+        return group
+
+    def make_work_points_group(self):
+        group = QtWidgets.QGroupBox("Puntos de trabajo — click en mapa → coords SAMLight")
+        layout = QtWidgets.QVBoxLayout(group)
+
+        note = QtWidgets.QLabel(
+            "Con calibración activa (≥3 pts): haz click → obtén coords SAMLight automáticamente.\n"
+            "Aparecen como cruces en el mapa y en los selectores A/B de perfil."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(note)
+
+        pen_row = QtWidgets.QHBoxLayout()
+        self.combo_work_crosses_pen = self.make_pen_combo(self.work_crosses_pen)
+        pen_row.addWidget(QtWidgets.QLabel("Pen cruces trabajo"))
+        pen_row.addWidget(self.combo_work_crosses_pen, 1)
+        layout.addLayout(pen_row)
+        self.combo_work_crosses_pen.currentIndexChanged.connect(
+            lambda _idx: self.set_work_crosses_pen(self.combo_work_crosses_pen.currentData()))
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_add_wp = QtWidgets.QPushButton("➕ Nuevo punto")
+        self.btn_del_wp = QtWidgets.QPushButton("Borrar sel.")
+        self.btn_clear_wp = QtWidgets.QPushButton("Borrar todos")
+        btn_row.addWidget(self.btn_add_wp)
+        btn_row.addWidget(self.btn_del_wp)
+        btn_row.addWidget(self.btn_clear_wp)
+        layout.addLayout(btn_row)
+
+        self.work_table = QtWidgets.QTableWidget(0, 3)
+        self.work_table.setHorizontalHeaderLabels(["ID", "X SAMLight (mm)", "Y SAMLight (mm)"])
+        self.work_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.work_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.work_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.work_table.setMaximumHeight(110)
+        layout.addWidget(self.work_table)
+
+        self.btn_add_wp.clicked.connect(self.start_add_work_point)
+        self.btn_del_wp.clicked.connect(self.delete_selected_work_point)
+        self.btn_clear_wp.clicked.connect(self.clear_all_work_points)
         return group
 
     def make_levels_group(self):
@@ -523,7 +789,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.comsol_profile_plot.setBackground("w")
         self.comsol_profile_plot.showGrid(x=True, y=True, alpha=0.25)
         self.comsol_profile_plot.setLabel("bottom", "distancia", units="mm")
-        self.comsol_profile_plot.setLabel("left", "altura", units="mm")
+        self.comsol_profile_plot.setLabel("left", "altura", units="µm")
         layout.addWidget(self.comsol_profile_plot, 1)
         return group
 
@@ -551,6 +817,14 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         slider.setValue(self.value_to_slider(value))
         return slider
 
+    def make_pen_combo(self, selected_pen):
+        combo = QtWidgets.QComboBox()
+        for pen, rgb in sorted(SAMLIGHT_PEN_RGB.items()):
+            combo.addItem(f"Pen {pen}  RGB {rgb[0]},{rgb[1]},{rgb[2]}", pen)
+        index = combo.findData(int(selected_pen))
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        return combo
+
     def value_to_slider(self, value):
         if self.z_max <= self.z_min:
             return 0
@@ -575,11 +849,11 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
     def on_color_spin_changed(self):
         if self.block_updates:
             return
-        self.color_min = float(self.spin_color_min.value())
-        self.color_max = float(self.spin_color_max.value())
+        self.color_min = float(self.spin_color_min.value()) / 1000.0
+        self.color_max = float(self.spin_color_max.value()) / 1000.0
         if self.color_min >= self.color_max:
             self.color_max = self.color_min + 0.001
-            self.set_spin_quiet(self.spin_color_max, self.color_max)
+            self.set_spin_quiet(self.spin_color_max, self.color_max * 1000.0)
         self.set_slider_quiet(self.slider_color_min, self.color_min)
         self.set_slider_quiet(self.slider_color_max, self.color_max)
         self.update_image()
@@ -591,8 +865,8 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.color_max = self.slider_to_value(self.slider_color_max.value())
         if self.color_min >= self.color_max:
             return
-        self.set_spin_quiet(self.spin_color_min, self.color_min)
-        self.set_spin_quiet(self.spin_color_max, self.color_max)
+        self.set_spin_quiet(self.spin_color_min, self.color_min * 1000.0)
+        self.set_spin_quiet(self.spin_color_max, self.color_max * 1000.0)
         self.update_image()
 
     def clear_layout(self, layout):
@@ -608,16 +882,27 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
     def sorted_level_ids(self):
         return sorted(self.level_thresholds)
 
+    def default_pen_for_level(self, level):
+        return int(np.clip(int(level) - 1, 1, max(SAMLIGHT_PEN_RGB)))
+
+    def pen_rgb(self, pen):
+        return SAMLIGHT_PEN_RGB.get(int(pen), (0, 0, 0))
+
+    def pen_dxf_color(self, pen):
+        idx = (int(pen) - 1) % len(DXF_COLOR_CODES)
+        return DXF_COLOR_CODES[idx]
+
     def level_color(self, level):
         return LEVEL_STYLE_COLORS[(int(level) - 2) % len(LEVEL_STYLE_COLORS)]
 
     def dxf_config_for_level(self, level):
-        idx = (int(level) - 2) % len(DXF_COLOR_CODES)
-        pin = f"PIN_{int(level) - 1}"
+        pen_idx = self.level_pen_assignments.get(int(level), self.default_pen_for_level(level))
+        pin = f"PEN_{pen_idx}"
         return {
             "pin": pin,
             "layer": f"{pin}_NIVEL_{int(level)}",
-            "color": DXF_COLOR_CODES[idx],
+            "color": self.pen_dxf_color(pen_idx),
+            "rgb": self.pen_rgb(pen_idx),
         }
 
     def rebuild_level_controls(self):
@@ -633,22 +918,46 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             color = self.level_color(level)
             label = QtWidgets.QLabel(f"N{level}")
             label.setStyleSheet(f"font-weight: 700; color: rgb({color[0]}, {color[1]}, {color[2]});")
-            spin = self.make_spin(self.level_thresholds[level], self.z_min, self.z_max, decimals=6, step=0.001)
+            spin = self.make_spin(self.level_thresholds[level] * 1000, self.z_min * 1000, self.z_max * 1000, decimals=2, step=0.5)
             slider = self.make_slider(self.level_thresholds[level])
+            pen_combo = self.make_pen_combo(self.level_pen_assignments.get(level, self.default_pen_for_level(level)))
             remove = QtWidgets.QPushButton("Quitar")
             remove.setEnabled(len(self.level_thresholds) > 1)
 
             row.addWidget(label, 0, 0)
             row.addWidget(spin, 0, 1)
-            row.addWidget(remove, 0, 2)
-            row.addWidget(slider, 1, 0, 1, 3)
+            row.addWidget(pen_combo, 0, 2)
+            row.addWidget(remove, 0, 3)
+            row.addWidget(slider, 1, 0, 1, 4)
 
-            spin.valueChanged.connect(lambda value, lvl=level: self.set_level_threshold(lvl, float(value), "spin"))
+            spin.valueChanged.connect(lambda value, lvl=level: self.set_level_threshold(lvl, float(value) / 1000.0, "spin"))
             slider.valueChanged.connect(lambda value, lvl=level: self.set_level_threshold(lvl, self.slider_to_value(value), "slider"))
+            pen_combo.currentIndexChanged.connect(lambda _idx, lvl=level, combo=pen_combo: self.set_level_pen(lvl, combo.currentData()))
             remove.clicked.connect(lambda _checked=False, lvl=level: self.remove_level(lvl))
 
-            self.level_controls[level] = {"spin": spin, "slider": slider, "row": row_widget}
+            self.level_controls[level] = {"spin": spin, "slider": slider, "pen": pen_combo, "row": row_widget}
             self.levels_layout.addWidget(row_widget)
+
+    def set_level_pen(self, level, pen):
+        if pen is None:
+            return
+        level = int(level)
+        pen = int(pen)
+        self.level_pen_assignments[level] = pen
+        self.update_dxf_profile_plot()
+        self.log(f"N{level} asignado a Pen {pen} RGB {self.pen_rgb(pen)}.")
+
+    def set_calibration_crosses_pen(self, pen):
+        if pen is None:
+            return
+        self.calibration_crosses_pen = int(pen)
+        self.log(f"Cruces de calibracion asignadas a Pen {pen} RGB {self.pen_rgb(pen)}.")
+
+    def set_work_crosses_pen(self, pen):
+        if pen is None:
+            return
+        self.work_crosses_pen = int(pen)
+        self.log(f"Cruces de trabajo asignadas a Pen {pen} RGB {self.pen_rgb(pen)}.")
 
     def set_level_threshold(self, level, value, source):
         if self.block_updates:
@@ -663,6 +972,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         current_max = max(self.level_thresholds.values()) if self.level_thresholds else max(self.z_min, 0.0)
         step = max((self.z_max - self.z_min) * 0.03, 0.001)
         self.level_thresholds[next_level] = float(np.clip(current_max + step, self.z_min, self.z_max))
+        self.level_pen_assignments[next_level] = self.default_pen_for_level(next_level)
         self.enforce_level_order()
         self.rebuild_level_controls()
         self.update_dxf_profile_plot()
@@ -679,6 +989,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             return
         removed = int(level)
         self.level_thresholds.pop(removed, None)
+        self.level_pen_assignments.pop(removed, None)
         self.rebuild_level_controls()
         self.update_dxf_profile_plot()
         self.log(f"Nivel N{removed} quitado.")
@@ -701,7 +1012,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         try:
             for level, controls in self.level_controls.items():
                 value = self.level_thresholds[level]
-                self.set_spin_quiet(controls["spin"], value)
+                self.set_spin_quiet(controls["spin"], value * 1000.0)
                 self.set_slider_quiet(controls["slider"], value)
         finally:
             self.block_updates = False
@@ -710,6 +1021,8 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         img = self.colorize_heightmap(self.z, self.color_min, self.color_max)
         self.image_item.setImage(np.flipud(img), autoLevels=False)
         self.image_item.setRect(QtCore.QRectF(self.x_min, self.y_min, self.x_max - self.x_min, self.y_max - self.y_min))
+        if self._view_mode == '3d':
+            self._update_3d_clim()
 
     def colorize_heightmap(self, values, vmin, vmax):
         vmin = min(float(vmin), -0.001)
@@ -740,6 +1053,237 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             lut[:, channel] = np.interp(x, HEIGHT_LUT_POSITIONS, HEIGHT_LUT_COLORS[:, channel]).astype(np.uint8)
         return lut
 
+    # ── 3D Keyence-style view ─────────────────────────────────────────────────
+
+    def _make_keyence_cmap(self):
+        try:
+            from matplotlib.colors import LinearSegmentedColormap
+            positions = HEIGHT_LUT_POSITIONS.tolist()
+            colors_norm = [[r / 255.0, g / 255.0, b / 255.0] for r, g, b in HEIGHT_LUT_COLORS]
+            return LinearSegmentedColormap.from_list(
+                'keyence', list(zip(positions, colors_norm)), N=256)
+        except ImportError:
+            return 'rainbow'
+
+    def _switch_view_mode(self, mode_text):
+        if '3D' in mode_text and HAS_PYVISTA:
+            self._view_mode = '3d'
+            self.map_stack.setCurrentIndex(1)
+            self._lbl_3d_controls.setVisible(True)
+            self._update_3d_view()
+        else:
+            self._view_mode = '2d'
+            self.map_stack.setCurrentIndex(0)
+            self._lbl_3d_controls.setVisible(False)
+
+    def _on_height_mag_changed(self):
+        if self._view_mode == '3d':
+            self._update_3d_view()
+
+    def _update_3d_view(self):
+        if not HAS_PYVISTA or self._view_mode != '3d':
+            return
+
+        nr, nc = self.z.shape
+        x_arr = np.linspace(self.x_min, self.x_max, nc)
+        y_arr = np.linspace(self.y_max, self.y_min, nr)  # y_max->y_min: fila 0 en arriba (y=0), igual que 2D
+        xx, yy = np.meshgrid(x_arr, y_arr)
+
+        mag = float(self._spin_height_mag.value())
+        z_finite = np.isfinite(self.z)
+        fallback = float(np.nanmedian(self.z[z_finite])) if z_finite.any() else 0.0
+        zz_vis = np.where(z_finite, self.z * mag, fallback * mag)
+
+        points = np.column_stack([xx.ravel(), yy.ravel(), zz_vis.ravel()])
+        grid = pv.StructuredGrid()
+        grid.points = points
+        grid.dimensions = [nc, nr, 1]
+        grid.point_data["height_mm"] = np.where(z_finite, self.z, np.nan).ravel()
+
+        try:
+            cmap = self._make_keyence_cmap()
+        except Exception:
+            cmap = 'rainbow'
+
+        self._plotter.clear()
+        self._plotter.set_background('black')
+        self._plotter.enable_trackball_style()
+
+        self._3d_actor = self._plotter.add_mesh(
+            grid,
+            scalars="height_mm",
+            cmap=cmap,
+            clim=[self.color_min, self.color_max],
+            nan_color='dimgray',
+            nan_opacity=0.5,
+            show_scalar_bar=True,
+            scalar_bar_args={
+                'title': 'Height (mm)',
+                'vertical': True,
+                'position_x': 0.02,
+                'position_y': 0.05,
+                'width': 0.07,
+                'height': 0.90,
+                'label_font_size': 11,
+                'title_font_size': 11,
+                'color': 'white',
+                'fmt': '%.4f',
+                'n_labels': 5,
+            },
+            lighting=True,
+        )
+
+        try:
+            self._plotter.show_bounds(
+                grid=True,
+                location='outer',
+                ticks='both',
+                xlabel='X (mm)',
+                ylabel='Y (mm)',
+                zlabel=f'Z×{mag:.0f} (mm)',
+                color='gray',
+                font_size=8,
+            )
+        except Exception:
+            pass
+
+        try:
+            self._plotter.add_axes(color='white')
+        except Exception:
+            pass
+
+        self._plotter.view_isometric()
+        self._plotter.render()
+
+    def _update_3d_clim(self):
+        if not HAS_PYVISTA or self._view_mode != '3d':
+            return
+        if self._3d_actor is None:
+            self._update_3d_view()
+            return
+        try:
+            self._plotter.update_scalar_bar_range([self.color_min, self.color_max])
+            self._plotter.render()
+        except Exception:
+            self._update_3d_view()
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Puntos de trabajo ────────────────────────────────────────────────────
+
+    def next_work_point_id(self):
+        return f"WP{len(self.work_points) + 1}"
+
+    def start_add_work_point(self):
+        if self.affine_x is None:
+            self.log("Necesitas ≥3 puntos de calibración para usar puntos de trabajo.")
+            return
+        self.adding_work_point = True
+        self.adding_point = False
+        self.comsol_pick_mode = None
+        self.log("Haz click en el heightmap → se calculan coords SAMLight automáticamente.")
+
+    def add_work_point_at(self, x_mm, y_mm):
+        sx, sy = self.profile_to_samlight(x_mm, y_mm)
+        dlg = WorkPointDialog(self, self.next_work_point_id(), x_mm, y_mm, sx, sy)
+        self.adding_work_point = False
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        wp = WorkPoint(
+            point_id=dlg.point_id(),
+            profile_x_mm=float(np.clip(x_mm, self.x_min, self.x_max)),
+            profile_y_mm=float(np.clip(y_mm, self.y_min, self.y_max)),
+            samlight_x_mm=dlg.samlight_x(),
+            samlight_y_mm=dlg.samlight_y(),
+        )
+        self.work_points.append(wp)
+        self.refresh_work_points()
+        self.refresh_profile_combos()
+        self.log(f"Punto trabajo {wp.point_id}: SAMLight ({wp.samlight_x_mm:.4f}, {wp.samlight_y_mm:.4f}) mm")
+        self._autosave_calibration()
+
+    def refresh_work_points(self):
+        self.clear_work_point_items()
+        half = CROSS_SIZE_MM / 2.0
+        pen = pg.mkPen((255, 80, 200), width=1.6)
+        for wp in self.work_points:
+            h = pg.PlotDataItem([wp.profile_x_mm - half, wp.profile_x_mm + half],
+                                [wp.profile_y_mm, wp.profile_y_mm], pen=pen)
+            v = pg.PlotDataItem([wp.profile_x_mm, wp.profile_x_mm],
+                                [wp.profile_y_mm - half, wp.profile_y_mm + half], pen=pen)
+            lbl = pg.TextItem(wp.point_id, color=(255, 80, 200), anchor=(0, 1))
+            lbl.setPos(wp.profile_x_mm, wp.profile_y_mm)
+            self.plot.addItem(h)
+            self.plot.addItem(v)
+            self.plot.addItem(lbl)
+            self.work_point_items.extend([h, v, lbl])
+        self.work_table.setRowCount(len(self.work_points))
+        for row, wp in enumerate(self.work_points):
+            self.work_table.setItem(row, 0, QtWidgets.QTableWidgetItem(wp.point_id))
+            self.work_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{wp.samlight_x_mm:.6f}"))
+            self.work_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{wp.samlight_y_mm:.6f}"))
+
+    def clear_work_point_items(self):
+        for item in self.work_point_items:
+            self.plot.removeItem(item)
+        self.work_point_items = []
+
+    def delete_selected_work_point(self):
+        rows = self.work_table.selectionModel().selectedRows()
+        if not rows:
+            self.log("No hay punto de trabajo seleccionado.")
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self.work_points):
+            removed = self.work_points.pop(idx)
+            self.refresh_work_points()
+            self.refresh_profile_combos()
+            self.log(f"Punto trabajo {removed.point_id} borrado.")
+            self._autosave_calibration()
+
+    def clear_all_work_points(self):
+        self.work_points.clear()
+        self.refresh_work_points()
+        self.refresh_profile_combos()
+        self.log("Todos los puntos de trabajo borrados.")
+
+    def _point_by_id_combined(self, point_id):
+        for p in self.points:
+            if p.point_id == point_id:
+                return p
+        for wp in self.work_points:
+            if wp.point_id == point_id:
+                return wp
+        return None
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _autosave_calibration(self):
+        if len(self.points) < 2:
+            return
+        output = CALIBRATION_DIR / f"calibracion_manual_{self.csv_file.stem}_autosave.csv"
+        residuals = self.residuals()
+        rows = [[
+            "id", "x_profile_mm", "y_profile_mm", "x_samlight_mm", "y_samlight_mm",
+            "use_for_affine", "residual_x_mm", "residual_y_mm", "error_mm",
+        ]]
+        for point in self.points:
+            rx, ry, err = residuals.get(point.point_id, ("", "", ""))
+            rows.append([
+                point.point_id,
+                f"{point.profile_x_mm:.6f}",
+                f"{point.profile_y_mm:.6f}",
+                f"{point.samlight_x_mm:.6f}",
+                f"{point.samlight_y_mm:.6f}",
+                "yes" if point.use_for_affine else "no",
+                f"{rx:.6f}" if rx != "" else "",
+                f"{ry:.6f}" if ry != "" else "",
+                f"{err:.6f}" if err != "" else "",
+            ])
+        with output.open("w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(rows)
+        self.log(f"[autosave] {output.name}")
+
     def log(self, text):
         self.status.appendPlainText(str(text))
 
@@ -759,6 +1303,9 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         if self.comsol_pick_mode == "end":
             self.set_comsol_end_from_direction(x_mm, y_mm)
             self.comsol_pick_mode = None
+            return
+        if self.adding_work_point:
+            self.add_work_point_at(x_mm, y_mm)
             return
         if self.adding_point:
             self.add_point_at(x_mm, y_mm)
@@ -801,6 +1348,9 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             return
         if self.dragging_index is not None:
             self.log(f"Punto {self.points[self.dragging_index].point_id} movido.")
+            self.dragging_index = None
+            self._autosave_calibration()
+            return
         self.dragging_index = None
 
     def nearest_point_index(self, x_mm, y_mm):
@@ -997,6 +1547,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.refresh_calibration()
         self.refresh_points()
         self.log(f"Punto {point.point_id} colocado.")
+        self._autosave_calibration()
 
     def update_selected_point(self):
         if self.selected_index is None or not (0 <= self.selected_index < len(self.points)):
@@ -1009,6 +1560,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.refresh_calibration()
         self.refresh_points()
         self.log(f"Punto {point.point_id} actualizado.")
+        self._autosave_calibration()
 
     def delete_selected_point(self):
         if self.selected_index is None or not (0 <= self.selected_index < len(self.points)):
@@ -1019,6 +1571,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.refresh_calibration()
         self.refresh_points()
         self.log(f"Punto {removed.point_id} borrado.")
+        self._autosave_calibration()
 
     def select_point(self, idx):
         if idx is None or not (0 <= idx < len(self.points)):
@@ -1114,7 +1667,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
     def refresh_profile_combos(self):
         old_a = self.combo_p1.currentText()
         old_b = self.combo_p2.currentText()
-        ids = [p.point_id for p in self.points]
+        ids = [p.point_id for p in self.points] + [wp.point_id for wp in self.work_points]
         self.combo_p1.blockSignals(True)
         self.combo_p2.blockSignals(True)
         self.combo_p1.clear()
@@ -1293,19 +1846,38 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = DXF_OUTPUT_DIR / f"Cruces_Calibracion_{self.csv_file.stem}_{timestamp}.dxf"
-        cfg = {"layer": "CALIB_CRUCES_0p5mm", "color": "4"}
+        svg_output = output.with_suffix(".svg")
+        cfg = {
+            "layer": f"CALIB_CRUCES_PEN_{self.calibration_crosses_pen}_0p5mm",
+            "color": self.pen_dxf_color(self.calibration_crosses_pen),
+            "rgb": self.pen_rgb(self.calibration_crosses_pen),
+        }
         lines = dxf_header([cfg])
+        svg_segments = []
         half = CROSS_SIZE_MM / 2.0
         for point in self.points:
             add_dxf_line(lines, cfg["layer"], cfg["color"], point.samlight_x_mm - half, point.samlight_y_mm, point.samlight_x_mm + half, point.samlight_y_mm)
+            svg_segments.append({
+                "layer": cfg["layer"],
+                "rgb": svg_rgb_for_config(cfg),
+                "x0": point.samlight_x_mm - half, "y0": point.samlight_y_mm,
+                "x1": point.samlight_x_mm + half, "y1": point.samlight_y_mm,
+            })
             add_dxf_line(lines, cfg["layer"], cfg["color"], point.samlight_x_mm, point.samlight_y_mm - half, point.samlight_x_mm, point.samlight_y_mm + half)
+            svg_segments.append({
+                "layer": cfg["layer"],
+                "rgb": svg_rgb_for_config(cfg),
+                "x0": point.samlight_x_mm, "y0": point.samlight_y_mm - half,
+                "x1": point.samlight_x_mm, "y1": point.samlight_y_mm + half,
+            })
         lines.extend(["0", "ENDSEC", "0", "EOF"])
         output.write_text("\n".join(lines) + "\n", encoding="ascii")
-        self.log(f"DXF cruces guardado:\n{output}")
+        write_svg_lines(svg_output, svg_segments)
+        self.log(f"DXF cruces guardado:\n{output}\nSVG paralelo:\n{svg_output}")
 
     def update_profile_from_controls(self):
-        p1 = self.point_by_id(self.combo_p1.currentText())
-        p2 = self.point_by_id(self.combo_p2.currentText())
+        p1 = self._point_by_id_combined(self.combo_p1.currentText())
+        p2 = self._point_by_id_combined(self.combo_p2.currentText())
         if p1 is None or p2 is None or p1.point_id == p2.point_id:
             self.log("Perfil: selecciona dos puntos distintos.")
             return
@@ -1456,8 +2028,8 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             plot_widget.setTitle(empty_title)
             return
         distance = profile_data["distance_mm"]
-        height = profile_data["height_mm"]
-        plot_widget.plot(distance, height, pen=pg.mkPen("k", width=1.2))
+        height_um = profile_data["height_mm"] * 1000.0   # mm → µm para display
+        plot_widget.plot(distance, height_um, pen=pg.mkPen("k", width=1.2))
         if show_levels:
             levels = self.classify_profile_levels(profile_data)
             for level in self.sorted_level_ids():
@@ -1465,14 +2037,14 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
                 if np.any(mask):
                     plot_widget.plot(
                         distance[mask],
-                        height[mask],
+                        height_um[mask],
                         pen=None,
                         symbol="o",
                         symbolSize=5,
                         symbolBrush=self.level_color(level),
                     )
                 plot_widget.addLine(
-                    y=self.level_thresholds[level],
+                    y=self.level_thresholds[level] * 1000.0,   # mm → µm
                     pen=pg.mkPen(self.level_color(level), style=QtCore.Qt.PenStyle.DashLine),
                 )
         plot_widget.setTitle(f"Perfil {profile_data['p1']} -> {profile_data['p2']} | {profile_data['length_mm']:.3f} mm")
@@ -1491,6 +2063,151 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             current = value
         yield start, len(levels) - 1, current
 
+    def make_profile_list_group(self):
+        group = QtWidgets.QGroupBox("Lista de perfiles para exportar")
+        layout = QtWidgets.QVBoxLayout(group)
+
+        self.profile_list_table = QtWidgets.QTableWidget(0, 2)
+        self.profile_list_table.setHorizontalHeaderLabels(["Perfil", ""])
+        self.profile_list_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.profile_list_table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.profile_list_table.setColumnWidth(1, 32)
+        self.profile_list_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.profile_list_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.profile_list_table.setMaximumHeight(120)
+        layout.addWidget(self.profile_list_table)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_clear_profile_list = QtWidgets.QPushButton("Limpiar lista")
+        self.btn_export_all_dxf = QtWidgets.QPushButton("⬇ Exportar TODOS los perfiles (DXF)")
+        self.btn_export_all_dxf.setStyleSheet(
+            "font-weight:bold; background:#7b1fa2; color:white; padding:6px;")
+        btn_row.addWidget(self.btn_clear_profile_list)
+        btn_row.addWidget(self.btn_export_all_dxf, 1)
+        layout.addLayout(btn_row)
+
+        self.btn_clear_profile_list.clicked.connect(self.clear_profile_list)
+        self.btn_export_all_dxf.clicked.connect(self.export_all_profiles_dxf)
+        return group
+
+    def add_profile_to_list(self):
+        p1 = self._point_by_id_combined(self.combo_p1.currentText())
+        p2 = self._point_by_id_combined(self.combo_p2.currentText())
+        if p1 is None or p2 is None or p1.point_id == p2.point_id:
+            self.log("Perfil: selecciona dos puntos distintos.")
+            return
+        pair = (p1.point_id, p2.point_id)
+        if pair in self.profile_list:
+            self.log(f"Perfil {pair[0]}→{pair[1]} ya está en la lista.")
+            return
+        self.profile_list.append(pair)
+        self.refresh_profile_list_table()
+        self.log(f"Perfil {pair[0]}→{pair[1]} añadido a la lista ({len(self.profile_list)} total).")
+
+    def refresh_profile_list_table(self):
+        self.profile_list_table.setRowCount(len(self.profile_list))
+        for row, (p1_id, p2_id) in enumerate(self.profile_list):
+            self.profile_list_table.setItem(
+                row, 0, QtWidgets.QTableWidgetItem(f"{p1_id} → {p2_id}"))
+            btn = QtWidgets.QPushButton("✕")
+            btn.setFixedWidth(28)
+            btn.clicked.connect(lambda _, r=row: self._remove_profile_at(r))
+            self.profile_list_table.setCellWidget(row, 1, btn)
+
+    def _remove_profile_at(self, idx):
+        if 0 <= idx < len(self.profile_list):
+            removed = self.profile_list.pop(idx)
+            self.refresh_profile_list_table()
+            self.log(f"Perfil {removed[0]}→{removed[1]} eliminado de la lista.")
+
+    def clear_profile_list(self):
+        self.profile_list.clear()
+        self.refresh_profile_list_table()
+        self.log("Lista de perfiles vaciada.")
+
+    def export_all_profiles_dxf(self):
+        if not self.profile_list:
+            self.log("La lista de perfiles está vacía. Usa ➕ para añadir perfiles.")
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output = DXF_OUTPUT_DIR / f"Perfiles_Samlight_{self.csv_file.stem}_{timestamp}.dxf"
+        svg_output = output.with_suffix(".svg")
+        layer_configs = [self.dxf_config_for_level(level) for level in self.sorted_level_ids()]
+        wp_cfg = {
+            "layer": f"TRABAJO_CRUCES_PEN_{self.work_crosses_pen}_0p5mm",
+            "color": self.pen_dxf_color(self.work_crosses_pen),
+            "rgb": self.pen_rgb(self.work_crosses_pen),
+        }
+        all_configs = layer_configs + ([wp_cfg] if self.work_points else [])
+        lines = dxf_header(all_configs)
+        svg_segments = []
+        total_exported = {int(level): 0 for level in self.sorted_level_ids()}
+        total_skipped = 0
+        ok = 0
+        for p1_id, p2_id in self.profile_list:
+            p1 = self._point_by_id_combined(p1_id)
+            p2 = self._point_by_id_combined(p2_id)
+            if p1 is None or p2 is None:
+                self.log(f"[AVISO] {p1_id}/{p2_id} no encontrados, omitido.")
+                continue
+            self.compute_profile(p1, p2)
+            if self.dxf_profile_data is None:
+                continue
+            levels = self.classify_profile_levels(self.dxf_profile_data)
+            sx = self.dxf_profile_data["samlight_x_mm"]
+            sy = self.dxf_profile_data["samlight_y_mm"]
+            distance = self.dxf_profile_data["distance_mm"]
+            for start_idx, end_idx, level in self.profile_runs(levels):
+                if level not in total_exported:
+                    continue
+                if end_idx <= start_idx or (distance[end_idx] - distance[start_idx]) < MIN_DXF_SEGMENT_MM:
+                    total_skipped += 1
+                    continue
+                cfg = self.dxf_config_for_level(level)
+                add_dxf_line(lines, cfg["layer"], cfg["color"],
+                             sx[start_idx], sy[start_idx], sx[end_idx], sy[end_idx])
+                svg_segments.append({
+                    "layer": cfg["layer"],
+                    "rgb": svg_rgb_for_config(cfg),
+                    "x0": float(sx[start_idx]), "y0": float(sy[start_idx]),
+                    "x1": float(sx[end_idx]), "y1": float(sy[end_idx]),
+                })
+                total_exported[level] += 1
+            ok += 1
+        half = CROSS_SIZE_MM / 2.0
+        for wp in self.work_points:
+            add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
+                         wp.samlight_x_mm - half, wp.samlight_y_mm,
+                         wp.samlight_x_mm + half, wp.samlight_y_mm)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm - half, "y0": wp.samlight_y_mm,
+                "x1": wp.samlight_x_mm + half, "y1": wp.samlight_y_mm,
+            })
+            add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
+                         wp.samlight_x_mm, wp.samlight_y_mm - half,
+                         wp.samlight_x_mm, wp.samlight_y_mm + half)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm, "y0": wp.samlight_y_mm - half,
+                "x1": wp.samlight_x_mm, "y1": wp.samlight_y_mm + half,
+            })
+        lines.extend(["0", "ENDSEC", "0", "EOF"])
+        output.write_text("\n".join(lines) + "\n", encoding="ascii")
+        write_svg_lines(svg_output, svg_segments)
+        exported_text = " ".join(f"N{level}={count}" for level, count in total_exported.items())
+        wp_text = f" | cruces trabajo={len(self.work_points)}" if self.work_points else ""
+        self.log(
+            f"DXF multi-perfil guardado ({ok}/{len(self.profile_list)} perfiles):\n"
+            f"{output}\nSVG paralelo:\n{svg_output}\n"
+            f"{exported_text} | cortos={total_skipped}{wp_text}")
+
     def export_profile_dxf(self):
         if self.dxf_profile_data is None:
             self.log("No hay perfil seleccionado.")
@@ -1500,8 +2217,16 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         p1 = self.dxf_profile_data["p1"]
         p2 = self.dxf_profile_data["p2"]
         output = DXF_OUTPUT_DIR / f"Perfil_Samlight_{self.csv_file.stem}_{p1}_{p2}_{timestamp}.dxf"
+        svg_output = output.with_suffix(".svg")
         layer_configs = [self.dxf_config_for_level(level) for level in self.sorted_level_ids()]
-        lines = dxf_header(layer_configs)
+        wp_cfg = {
+            "layer": f"TRABAJO_CRUCES_PEN_{self.work_crosses_pen}_0p5mm",
+            "color": self.pen_dxf_color(self.work_crosses_pen),
+            "rgb": self.pen_rgb(self.work_crosses_pen),
+        }
+        all_configs = layer_configs + ([wp_cfg] if self.work_points else [])
+        lines = dxf_header(all_configs)
+        svg_segments = []
         sx = self.dxf_profile_data["samlight_x_mm"]
         sy = self.dxf_profile_data["samlight_y_mm"]
         distance = self.dxf_profile_data["distance_mm"]
@@ -1515,11 +2240,42 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
                 continue
             cfg = self.dxf_config_for_level(level)
             add_dxf_line(lines, cfg["layer"], cfg["color"], sx[start_idx], sy[start_idx], sx[end_idx], sy[end_idx])
+            svg_segments.append({
+                "layer": cfg["layer"],
+                "rgb": svg_rgb_for_config(cfg),
+                "x0": float(sx[start_idx]), "y0": float(sy[start_idx]),
+                "x1": float(sx[end_idx]), "y1": float(sy[end_idx]),
+            })
             exported[level] += 1
+        half = CROSS_SIZE_MM / 2.0
+        for wp in self.work_points:
+            add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
+                         wp.samlight_x_mm - half, wp.samlight_y_mm,
+                         wp.samlight_x_mm + half, wp.samlight_y_mm)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm - half, "y0": wp.samlight_y_mm,
+                "x1": wp.samlight_x_mm + half, "y1": wp.samlight_y_mm,
+            })
+            add_dxf_line(lines, wp_cfg["layer"], wp_cfg["color"],
+                         wp.samlight_x_mm, wp.samlight_y_mm - half,
+                         wp.samlight_x_mm, wp.samlight_y_mm + half)
+            svg_segments.append({
+                "layer": wp_cfg["layer"],
+                "rgb": svg_rgb_for_config(wp_cfg),
+                "x0": wp.samlight_x_mm, "y0": wp.samlight_y_mm - half,
+                "x1": wp.samlight_x_mm, "y1": wp.samlight_y_mm + half,
+            })
+
         lines.extend(["0", "ENDSEC", "0", "EOF"])
         output.write_text("\n".join(lines) + "\n", encoding="ascii")
+        write_svg_lines(svg_output, svg_segments)
         exported_text = " ".join(f"N{level}={count}" for level, count in exported.items())
-        self.log(f"DXF perfil guardado:\n{output}\n{exported_text} | cortos ignorados={skipped}")
+        wp_text = f" | cruces trabajo={len(self.work_points)}" if self.work_points else ""
+        self.log(
+            f"DXF perfil guardado:\n{output}\nSVG paralelo:\n{svg_output}\n"
+            f"{exported_text} | cortos ignorados={skipped}{wp_text}")
 
     def export_profile_csv(self):
         if self.dxf_profile_data is None:
