@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="3.315649mm" height="2.858199mm"
+     viewBox="-35.418053 -26.510178 3.315649 2.858199">
+  <g fill="none" stroke-width="0.02" stroke-linecap="round">
+    <line id="PEN_3_NIVEL_2" x1="-34.117286" y1="-25.237883" x2="-33.931142" y2="-25.156137" stroke="rgb(0,0,255)" />
+    <line id="PEN_3_NIVEL_2" x1="-33.829609" y1="-25.111548" x2="-33.744998" y2="-25.074390" stroke="rgb(0,0,255)" />
+    <line id="PEN_3_NIVEL_2" x1="-33.714538" y1="-25.061013" x2="-33.616390" y2="-25.017911" stroke="rgb(0,0,255)" />
+    <line id="PEN_3_NIVEL_2" x1="-33.582546" y1="-25.003048" x2="-33.491166" y2="-24.962917" stroke="rgb(0,0,255)" />
+    <line id="TRABAJO_CRUCES_PEN_6_0p5mm" x1="-33.602404" y1="-24.901979" x2="-33.102404" y2="-24.901979" stroke="rgb(0,170,170)" />
+    <line id="TRABAJO_CRUCES_PEN_6_0p5mm" x1="-33.352404" y1="-24.651979" x2="-33.352404" y2="-25.151979" stroke="rgb(0,170,170)" />
+    <line id="TRABAJO_CRUCES_PEN_6_0p5mm" x1="-34.418053" y1="-25.260178" x2="-33.918053" y2="-25.260178" stroke="rgb(0,170,170)" />
+    <line id="TRABAJO_CRUCES_PEN_6_0p5mm" x1="-34.168053" y1="-25.010178" x2="-34.168053" y2="-25.510178" stroke="rgb(0,170,170)" />
+  </g>
+</svg>

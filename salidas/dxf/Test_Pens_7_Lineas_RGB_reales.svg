@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="10mm" height="25mm"
+     viewBox="-56 -2 10 25">
+  <g fill="none" stroke-width="0.2" stroke-linecap="round">
+    <line id="pen_1_rgb_255_0_0" x1="-55" y1="0" x2="-50" y2="0"
+          stroke="rgb(255,0,0)" />
+    <line id="pen_2_rgb_0_255_0" x1="-55" y1="3" x2="-50" y2="3"
+          stroke="rgb(0,255,0)" />
+    <line id="pen_3_rgb_0_0_255" x1="-55" y1="6" x2="-50" y2="6"
+          stroke="rgb(0,0,255)" />
+    <line id="pen_4_rgb_0_128_255" x1="-55" y1="9" x2="-50" y2="9"
+          stroke="rgb(0,128,255)" />
+    <line id="pen_5_rgb_255_170_0" x1="-55" y1="12" x2="-50" y2="12"
+          stroke="rgb(255,170,0)" />
+    <line id="pen_6_rgb_0_170_170" x1="-55" y1="15" x2="-50" y2="15"
+          stroke="rgb(0,170,170)" />
+    <line id="pen_7_rgb_85_85_85" x1="-55" y1="18" x2="-50" y2="18"
+          stroke="rgb(85,85,85)" />
+  </g>
+</svg>

@@ -8,9 +8,6 @@ __pycache__/
 venv/
 env/
 
-# Generated outputs
-salidas/
-
 # Archived old prototypes / generated files
 archivo_viejo/
 

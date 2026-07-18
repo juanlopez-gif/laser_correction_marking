@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="9.500000mm" height="7.500000mm"
+     viewBox="-39.250000 -34.750000 9.500000 7.500000">
+  <g fill="none" stroke-width="0.02" stroke-linecap="round">
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-32.250000" y1="-29.000000" x2="-31.750000" y2="-29.000000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-32.000000" y1="-28.750000" x2="-32.000000" y2="-29.250000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-34.250000" y1="-31.000000" x2="-33.750000" y2="-31.000000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-34.000000" y1="-30.750000" x2="-34.000000" y2="-31.250000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-38.250000" y1="-33.500000" x2="-37.750000" y2="-33.500000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-38.000000" y1="-33.250000" x2="-38.000000" y2="-33.750000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-38.250000" y1="-31.000000" x2="-37.750000" y2="-31.000000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-38.000000" y1="-30.750000" x2="-38.000000" y2="-31.250000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-38.250000" y1="-28.500000" x2="-37.750000" y2="-28.500000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-38.000000" y1="-28.250000" x2="-38.000000" y2="-28.750000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-34.750000" y1="-33.500000" x2="-34.250000" y2="-33.500000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-34.500000" y1="-33.250000" x2="-34.500000" y2="-33.750000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-31.250000" y1="-33.500000" x2="-30.750000" y2="-33.500000" stroke="rgb(0,128,255)" />
+    <line id="CALIB_CRUCES_PEN_4_0p5mm" x1="-31.000000" y1="-33.250000" x2="-31.000000" y2="-33.750000" stroke="rgb(0,128,255)" />
+  </g>
+</svg>
