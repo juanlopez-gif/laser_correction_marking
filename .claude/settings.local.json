@@ -7,7 +7,12 @@
       "Bash(git push *)",
       "Bash(dir .claude /b)",
       "PowerShell(Get-ChildItem \"e:\\\\Juan\\\\laser_correction_marking-main\\\\salidas\" -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum | Select-Object @{n='MB';e={[math]::Round\\($_.Sum/1MB,1\\)}}, Count; Get-ChildItem \"e:\\\\Juan\\\\laser_correction_marking-main\\\\archivo_viejo\" -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum | Select-Object @{n='MB';e={[math]::Round\\($_.Sum/1MB,1\\)}}, Count)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git config *)",
+      "PowerShell(cmdkey /delete:LegacyGeneric:target=git:https://github.com 2>&1)",
+      "PowerShell(cmdkey /delete:LegacyGeneric:target=https://github.com 2>&1)",
+      "Bash(git checkout *)"
     ]
   }
 }

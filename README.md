@@ -6,6 +6,123 @@ and interactively comparing PRE/POST laser correction profiles.
 
 ---
 
+## SAMLight Pen Mapping and SVG Export
+
+The current implementation exports both DXF and SVG. The DXF is kept for
+traceability and CAD inspection, but the **validated SAMLight import path is the
+SVG**, because SAMLight assigns pens much more reliably from SVG RGB colors than
+from DXF layer names or DXF color indices.
+
+Height levels are still named `N2`, `N3`, `N4`, etc., but each level now has a
+**Pen 1-14 selector** in the Qt calibration UI. The height threshold and the
+SAMLight pen assignment are independent.
+
+Default level assignment:
+
+| Level | Default pen | Export layer example |
+|---|---:|---|
+| N2 | Pen 1 | `PEN_1_NIVEL_2` |
+| N3 | Pen 2 | `PEN_2_NIVEL_3` |
+| N4 | Pen 3 | `PEN_3_NIVEL_4` |
+
+The dropdowns let you override those defaults. The calibration UI also exposes
+pen selectors for:
+
+| Entity type | UI control | Default |
+|---|---|---:|
+| Height-level profile segments | Pen dropdown in each N-level row | N2 -> Pen 1, N3 -> Pen 2, ... |
+| Calibration crosses | `Pen cruces calibracion` | Pen 4 |
+| Work-point crosses | `Pen cruces trabajo` | Pen 6 |
+
+For profile and cross exports, the Qt tool writes paired files:
+
+```text
+Perfil_Samlight_{stem}_{P1}_{P2}_{timestamp}.dxf
+Perfil_Samlight_{stem}_{P1}_{P2}_{timestamp}.svg
+
+Perfiles_Samlight_{stem}_{timestamp}.dxf
+Perfiles_Samlight_{stem}_{timestamp}.svg
+
+Cruces_Calibracion_{stem}_{timestamp}.dxf
+Cruces_Calibracion_{stem}_{timestamp}.svg
+```
+
+The RGB table is stored in:
+
+- `calibracion/samlight_pens_rgb.csv`, as the human-readable calibration record.
+- `SAMLIGHT_PEN_RGB` in `interfaz_calibracion_manual_qt.py`, used by the exporter.
+
+Validated SAMLight pen RGB table:
+
+| Pen | R | G | B |
+|---:|---:|---:|---:|
+| 1 | 255 | 0 | 0 |
+| 2 | 0 | 255 | 0 |
+| 3 | 0 | 0 | 255 |
+| 4 | 0 | 128 | 255 |
+| 5 | 255 | 170 | 0 |
+| 6 | 0 | 170 | 170 |
+| 7 | 85 | 85 | 85 |
+| 8 | 255 | 85 | 0 |
+| 9 | 0 | 170 | 0 |
+| 10 | 255 | 255 | 0 |
+| 11 | 255 | 0 | 255 |
+| 12 | 0 | 0 | 85 |
+| 13 | 255 | 170 | 255 |
+| 14 | 170 | 225 | 255 |
+
+Important: **Pen 10 uses `255,255,0`**. Earlier cyan/teal candidates were confused
+by SAMLight with Pen 4 or Pen 6.
+
+### Implementation Notes
+
+The implementation is intentionally simple:
+
+- `SAMLIGHT_PEN_RGB` stores the validated pen colors.
+- `make_pen_combo()` builds the Pen 1-14 dropdowns.
+- `level_pen_assignments` stores the selected pen per height level.
+- `dxf_config_for_level()` creates the export layer name and attaches the selected
+  pen RGB.
+- `write_svg_lines()` writes the parallel SVG file using the RGB color that
+  SAMLight should map back to the selected pen.
+
+DXF colors are still written, but they are secondary. The important file for
+automatic SAMLight pen assignment is the SVG.
+
+### Critical SVG `-Y` Correction
+
+This is the important geometry detail: **SVG Y must be negated**.
+
+DXF/SAMLight coordinates are treated as normal Cartesian millimeters. SVG's native
+coordinate system has Y increasing downward. If the exporter writes SAMLight Y
+directly into SVG, the imported geometry appears vertically inverted in SAMLight.
+
+The exporter therefore writes:
+
+```text
+SVG x = SAMLight x
+SVG y = -SAMLight y
+```
+
+The SVG `viewBox` is also created with the inverted Y range:
+
+```text
+viewBox = x_min, -y_max, width, height
+```
+
+This lives in `write_svg_lines()` in `interfaz_calibracion_manual_qt.py`.
+Do not remove the `-Y` conversion unless the SAMLight SVG import settings are
+changed and the orientation is revalidated with a known test file.
+
+Useful validation files:
+
+| File | Purpose |
+|---|---|
+| `salidas/dxf/Test_Pens_14_Lineas_RGB_reales.svg` | One line per pen using the current validated RGB table |
+| `salidas/dxf/Test_Pens_14_Lineas_RGB_reales_pen10_255_255_0.svg` | Pen 10 yellow validation test |
+
+---
+
 ## Requirements
 
 | Requirement | Version |
@@ -178,8 +295,12 @@ saved, and any warnings. Read it to confirm exports completed successfully.
 |---|---|---|
 | `calibracion_manual_{stem}_{ts}.csv` | `calibracion/` | Reloadable calibration point pairs |
 | `calibracion_affine_{stem}_{ts}.csv` | `calibracion/` | Affine matrix for `interfazmejorada.py` |
-| `Cruces_{stem}_{ts}.dxf` | `salidas/dxf/` | DXF crosses at SAMLight coordinates |
-| `Perfil_{stem}_{ts}.dxf` | `salidas/dxf/` | DXF height-level trajectory |
+| `Cruces_Calibracion_{stem}_{ts}.dxf` | `salidas/dxf/` | DXF crosses at SAMLight coordinates |
+| `Cruces_Calibracion_{stem}_{ts}.svg` | `salidas/dxf/` | SVG crosses with validated pen RGB colors and `-Y` correction |
+| `Perfil_Samlight_{stem}_{P1}_{P2}_{ts}.dxf` | `salidas/dxf/` | DXF height-level trajectory |
+| `Perfil_Samlight_{stem}_{P1}_{P2}_{ts}.svg` | `salidas/dxf/` | SVG height-level trajectory for SAMLight pen-color import |
+| `Perfiles_Samlight_{stem}_{ts}.dxf` | `salidas/dxf/` | DXF export for all queued profiles |
+| `Perfiles_Samlight_{stem}_{ts}.svg` | `salidas/dxf/` | SVG export for all queued profiles |
 | `Perfil_{stem}_{ts}.csv` | `salidas/csv/` | Profile with both coordinate systems |
 | `Perfil_COMSOL_{stem}_{ts}.csv` | `salidas/csv/` | COMSOL profile (x_mm, height_mm) |
 | `Perfil_COMSOL_{stem}_{ts}.txt` | `salidas/txt/` | COMSOL profile (plain two-column) |

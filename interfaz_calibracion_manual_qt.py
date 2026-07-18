@@ -34,6 +34,9 @@ for directory in (INPUT_DIR, CALIBRATION_DIR, DXF_OUTPUT_DIR, CSV_OUTPUT_DIR, IM
 DEFAULT_CSV_NAME = "test5.csv"
 BEAM_DIAMETER_MM = 0.055
 MIN_DXF_SEGMENT_MM = BEAM_DIAMETER_MM
+AREA_HATCH_SPACING_MM = BEAM_DIAMETER_MM / 2.0
+AREA_RUN_PAD_MM = BEAM_DIAMETER_MM * 0.5
+AREA_RUN_MERGE_GAP_MM = BEAM_DIAMETER_MM * 4.0
 CROSS_SIZE_MM = 0.500
 
 DXF_LEVEL_CONFIG = {
@@ -103,6 +106,12 @@ class WorkPoint:
     samlight_x_mm: float
     samlight_y_mm: float
     use_for_affine: bool = False
+
+
+@dataclass
+class AreaDefinition:
+    area_id: str
+    point_ids: list
 
 
 def clean_cell(value):
@@ -225,6 +234,11 @@ def svg_escape(value):
                       .replace('"', "&quot;")
                       .replace("<", "&lt;")
                       .replace(">", "&gt;"))
+
+
+def safe_layer_name(value):
+    text = str(value).strip() or "AREA"
+    return "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in text)
 
 
 def write_svg_lines(path, segments):
@@ -382,6 +396,11 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             level: self.default_pen_for_level(level)
             for level in self.level_thresholds
         }
+        self.area_level_thresholds = dict(self.level_thresholds)
+        self.area_level_pen_assignments = {
+            level: self.default_pen_for_level(level)
+            for level in self.area_level_thresholds
+        }
         self.calibration_crosses_pen = DEFAULT_CALIBRATION_CROSSES_PEN
         self.work_crosses_pen = DEFAULT_WORK_CROSSES_PEN
 
@@ -401,11 +420,15 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.dragging_comsol_endpoint = None
         self.block_updates = False
         self.level_controls = {}
+        self.area_level_controls = {}
         self._view_mode = '2d'
         self._3d_actor = None
         self.work_points = []
         self.profile_list = []
+        self.area_list = []
         self.work_point_items = []
+        self.area_items = []
+        self.area_preview_item = None
         self.adding_work_point = False
 
         self.point_scatter = None
@@ -422,6 +445,9 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.update_image()
         self.refresh_calibration()
         self.refresh_points()
+        self.refresh_work_points()
+        self.refresh_area_point_selector()
+        self.refresh_areas()
         self.refresh_comsol_items()
         self.update_profile_plot()
 
@@ -465,6 +491,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.tabs.addTab(self.make_height_tab(), "Heightmap")
         self.tabs.addTab(self.make_calibration_tab(), "Calibracion / DXF")
         self.tabs.addTab(self.make_perfiles_tab(), "Perfiles")
+        self.tabs.addTab(self.make_areas_tab(), "Areas")
         self.tabs.addTab(self.make_comsol_tab(), "COMSOL")
         side_layout.addWidget(self.tabs, 4)
         side_layout.addWidget(self.make_status_group(), 1)
@@ -512,6 +539,17 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         export_bar.addWidget(self.btn_export_bar_dxf)
         export_bar.addWidget(self.btn_export_bar_csv)
         layout.addLayout(export_bar)
+        return content
+
+    def make_areas_tab(self):
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        layout.addWidget(self.make_area_builder_group(), 2)
+        layout.addWidget(self.make_area_levels_group())
+        layout.addWidget(self.make_area_preview_group(), 3)
+        layout.addWidget(self.make_area_list_group(), 2)
         return content
 
     def make_comsol_tab(self):
@@ -723,6 +761,105 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.btn_add_wp.clicked.connect(self.start_add_work_point)
         self.btn_del_wp.clicked.connect(self.delete_selected_work_point)
         self.btn_clear_wp.clicked.connect(self.clear_all_work_points)
+        return group
+
+    def make_area_builder_group(self):
+        group = QtWidgets.QGroupBox("Crear area desde puntos")
+        layout = QtWidgets.QVBoxLayout(group)
+
+        form = QtWidgets.QFormLayout()
+        self.edit_area_id = QtWidgets.QLineEdit(self.next_area_id())
+        form.addRow("ID area", self.edit_area_id)
+        layout.addLayout(form)
+
+        self.area_point_list = QtWidgets.QListWidget()
+        self.area_point_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        self.area_point_list.setMinimumHeight(150)
+        layout.addWidget(self.area_point_list)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_refresh_area_points = QtWidgets.QPushButton("Actualizar puntos")
+        self.btn_add_area = QtWidgets.QPushButton("Crear area")
+        btn_row.addWidget(self.btn_refresh_area_points)
+        btn_row.addWidget(self.btn_add_area)
+        layout.addLayout(btn_row)
+
+        self.btn_refresh_area_points.clicked.connect(self.refresh_area_point_selector)
+        self.btn_add_area.clicked.connect(self.add_area_from_selection)
+        return group
+
+    def make_area_list_group(self):
+        group = QtWidgets.QGroupBox("Areas definidas")
+        layout = QtWidgets.QVBoxLayout(group)
+
+        self.area_table = QtWidgets.QTableWidget(0, 3)
+        self.area_table.setHorizontalHeaderLabels(["Area", "Puntos", ""])
+        self.area_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.area_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.area_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.area_table.setColumnWidth(2, 32)
+        self.area_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.area_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.area_table.itemSelectionChanged.connect(self.refresh_area_preview)
+        layout.addWidget(self.area_table, 1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_clear_areas = QtWidgets.QPushButton("Borrar todas")
+        self.btn_export_selected_area = QtWidgets.QPushButton("Exportar area seleccionada")
+        self.btn_export_all_areas = QtWidgets.QPushButton("Exportar TODAS las areas")
+        self.btn_export_all_areas.setStyleSheet("font-weight:bold; background:#6a1b9a; color:white; padding:6px;")
+        btn_row.addWidget(self.btn_clear_areas)
+        btn_row.addWidget(self.btn_export_selected_area)
+        btn_row.addWidget(self.btn_export_all_areas)
+        layout.addLayout(btn_row)
+
+        self.btn_clear_areas.clicked.connect(self.clear_areas)
+        self.btn_export_selected_area.clicked.connect(self.export_selected_area_dxf)
+        self.btn_export_all_areas.clicked.connect(self.export_all_areas_dxf)
+        return group
+
+    def make_area_levels_group(self):
+        group = QtWidgets.QGroupBox("Niveles de altura para areas")
+        layout = QtWidgets.QVBoxLayout(group)
+        self.area_levels_layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(self.area_levels_layout)
+
+        buttons = QtWidgets.QHBoxLayout()
+        self.btn_add_area_level = QtWidgets.QPushButton("Añadir nivel area")
+        self.btn_remove_area_level = QtWidgets.QPushButton("Quitar ultimo")
+        buttons.addWidget(self.btn_add_area_level)
+        buttons.addWidget(self.btn_remove_area_level)
+        layout.addLayout(buttons)
+
+        self.btn_add_area_level.clicked.connect(self.add_area_level)
+        self.btn_remove_area_level.clicked.connect(self.remove_highest_area_level)
+        self.rebuild_area_level_controls()
+        return group
+
+    def make_area_preview_group(self):
+        group = QtWidgets.QGroupBox("Preview tratamiento area")
+        layout = QtWidgets.QVBoxLayout(group)
+
+        self.area_preview_plot = pg.PlotWidget()
+        self.area_preview_plot.setBackground("w")
+        self.area_preview_plot.setAspectLocked(True)
+        self.area_preview_plot.showGrid(x=True, y=True, alpha=0.20)
+        self.area_preview_plot.setLabel("bottom", "x perfil", units="mm")
+        self.area_preview_plot.setLabel("left", "y perfil", units="mm")
+        self.area_preview_item = pg.ImageItem(axisOrder="row-major")
+        self.area_preview_plot.addItem(self.area_preview_item)
+        self.area_preview_item.setRect(QtCore.QRectF(self.x_min, self.y_min, self.x_max - self.x_min, self.y_max - self.y_min))
+        self.area_preview_plot.setXRange(self.x_min, self.x_max, padding=0.01)
+        self.area_preview_plot.setYRange(self.y_min, self.y_max, padding=0.01)
+        self.area_preview_plot.setMinimumHeight(220)
+        layout.addWidget(self.area_preview_plot, 1)
+
+        self.area_stats_table = QtWidgets.QTableWidget(0, 5)
+        self.area_stats_table.setHorizontalHeaderLabels(["Nivel", "Pen", "RGB", "Pixeles", "Area mm2"])
+        self.area_stats_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.area_stats_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.area_stats_table.setMaximumHeight(115)
+        layout.addWidget(self.area_stats_table)
         return group
 
     def make_levels_group(self):
@@ -994,6 +1131,116 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.update_dxf_profile_plot()
         self.log(f"Nivel N{removed} quitado.")
 
+    def sorted_area_level_ids(self):
+        return sorted(self.area_level_thresholds)
+
+    def area_dxf_config_for_level(self, level):
+        pen_idx = self.area_level_pen_assignments.get(int(level), self.default_pen_for_level(level))
+        pin = f"PEN_{pen_idx}"
+        return {
+            "pin": pin,
+            "layer": f"{pin}_AREA_NIVEL_{int(level)}",
+            "color": self.pen_dxf_color(pen_idx),
+            "rgb": self.pen_rgb(pen_idx),
+        }
+
+    def rebuild_area_level_controls(self):
+        if not hasattr(self, "area_levels_layout"):
+            return
+        self.clear_layout(self.area_levels_layout)
+        self.area_level_controls = {}
+        for level in self.sorted_area_level_ids():
+            row_widget = QtWidgets.QWidget()
+            row = QtWidgets.QGridLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+
+            label = QtWidgets.QLabel(f"N{level}")
+            label.setStyleSheet("font-weight: 700;")
+            spin = self.make_spin(
+                self.area_level_thresholds[level] * 1000,
+                self.z_min * 1000,
+                self.z_max * 1000,
+                decimals=2,
+                step=0.5,
+            )
+            pen_combo = self.make_pen_combo(self.area_level_pen_assignments.get(level, self.default_pen_for_level(level)))
+            remove = QtWidgets.QPushButton("Quitar")
+            remove.setEnabled(len(self.area_level_thresholds) > 1)
+
+            row.addWidget(label, 0, 0)
+            row.addWidget(spin, 0, 1)
+            row.addWidget(pen_combo, 0, 2)
+            row.addWidget(remove, 0, 3)
+
+            spin.valueChanged.connect(lambda value, lvl=level: self.set_area_level_threshold(lvl, float(value) / 1000.0))
+            pen_combo.currentIndexChanged.connect(lambda _idx, lvl=level, combo=pen_combo: self.set_area_level_pen(lvl, combo.currentData()))
+            remove.clicked.connect(lambda _checked=False, lvl=level: self.remove_area_level(lvl))
+
+            self.area_level_controls[level] = {"spin": spin, "pen": pen_combo, "row": row_widget}
+            self.area_levels_layout.addWidget(row_widget)
+
+    def set_area_level_threshold(self, level, value):
+        if self.block_updates:
+            return
+        self.area_level_thresholds[int(level)] = float(value)
+        self.enforce_area_level_order()
+        self.sync_area_level_controls()
+        self.refresh_areas()
+
+    def set_area_level_pen(self, level, pen):
+        if pen is None:
+            return
+        level = int(level)
+        pen = int(pen)
+        self.area_level_pen_assignments[level] = pen
+        self.refresh_areas()
+        self.log(f"Area N{level} asignado a Pen {pen} RGB {self.pen_rgb(pen)}.")
+
+    def add_area_level(self):
+        next_level = max(self.area_level_thresholds) + 1 if self.area_level_thresholds else 2
+        current_max = max(self.area_level_thresholds.values()) if self.area_level_thresholds else max(self.z_min, 0.0)
+        step = max((self.z_max - self.z_min) * 0.03, 0.001)
+        self.area_level_thresholds[next_level] = float(np.clip(current_max + step, self.z_min, self.z_max))
+        self.area_level_pen_assignments[next_level] = self.default_pen_for_level(next_level)
+        self.enforce_area_level_order()
+        self.rebuild_area_level_controls()
+        self.refresh_areas()
+        self.log(f"Nivel de area N{next_level} añadido.")
+
+    def remove_highest_area_level(self):
+        if not self.area_level_thresholds:
+            return
+        self.remove_area_level(max(self.area_level_thresholds))
+
+    def remove_area_level(self, level):
+        if len(self.area_level_thresholds) <= 1:
+            self.log("Debe quedar al menos un nivel de area.")
+            return
+        removed = int(level)
+        self.area_level_thresholds.pop(removed, None)
+        self.area_level_pen_assignments.pop(removed, None)
+        self.rebuild_area_level_controls()
+        self.refresh_areas()
+        self.log(f"Nivel de area N{removed} quitado.")
+
+    def enforce_area_level_order(self):
+        previous = None
+        for level in self.sorted_area_level_ids():
+            value = float(self.area_level_thresholds[level])
+            if previous is not None and value <= previous:
+                value = previous + 0.001
+            value = float(np.clip(value, self.z_min, self.z_max))
+            self.area_level_thresholds[level] = value
+            previous = value
+
+    def sync_area_level_controls(self):
+        self.block_updates = True
+        try:
+            for level, controls in self.area_level_controls.items():
+                self.set_spin_quiet(controls["spin"], self.area_level_thresholds[level] * 1000.0)
+        finally:
+            self.block_updates = False
+
     def enforce_level_order(self):
         previous = None
         for level in self.sorted_level_ids():
@@ -1222,6 +1469,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             self.work_table.setItem(row, 0, QtWidgets.QTableWidgetItem(wp.point_id))
             self.work_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{wp.samlight_x_mm:.6f}"))
             self.work_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{wp.samlight_y_mm:.6f}"))
+        self.refresh_areas()
 
     def clear_work_point_items(self):
         for item in self.work_point_items:
@@ -1262,14 +1510,19 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         if len(self.points) < 2:
             return
         output = CALIBRATION_DIR / f"calibracion_manual_{self.csv_file.stem}_autosave.csv"
+        self.write_manual_calibration_points(output)
+        self.log(f"[autosave] {output.name}")
+
+    def manual_calibration_rows(self):
         residuals = self.residuals()
         rows = [[
-            "id", "x_profile_mm", "y_profile_mm", "x_samlight_mm", "y_samlight_mm",
+            "kind", "id", "x_profile_mm", "y_profile_mm", "x_samlight_mm", "y_samlight_mm",
             "use_for_affine", "residual_x_mm", "residual_y_mm", "error_mm",
         ]]
         for point in self.points:
             rx, ry, err = residuals.get(point.point_id, ("", "", ""))
             rows.append([
+                "calibration",
                 point.point_id,
                 f"{point.profile_x_mm:.6f}",
                 f"{point.profile_y_mm:.6f}",
@@ -1280,9 +1533,24 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
                 f"{ry:.6f}" if ry != "" else "",
                 f"{err:.6f}" if err != "" else "",
             ])
+        for point in self.work_points:
+            rows.append([
+                "work",
+                point.point_id,
+                f"{point.profile_x_mm:.6f}",
+                f"{point.profile_y_mm:.6f}",
+                f"{point.samlight_x_mm:.6f}",
+                f"{point.samlight_y_mm:.6f}",
+                "no",
+                "",
+                "",
+                "",
+            ])
+        return rows
+
+    def write_manual_calibration_points(self, output):
         with output.open("w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows(rows)
-        self.log(f"[autosave] {output.name}")
+            csv.writer(f).writerows(self.manual_calibration_rows())
 
     def log(self, text):
         self.status.appendPlainText(str(text))
@@ -1627,6 +1895,7 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
 
         self.refresh_table()
         self.refresh_profile_combos()
+        self.refresh_areas()
         self.update_status()
 
     def clear_point_items(self):
@@ -1682,12 +1951,167 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
             self.combo_p2.setCurrentIndex(1)
         self.combo_p1.blockSignals(False)
         self.combo_p2.blockSignals(False)
+        self.refresh_area_point_selector()
 
     def point_by_id(self, point_id):
         for point in self.points:
             if point.point_id == point_id:
                 return point
         return None
+
+    def next_area_id(self):
+        return f"A{len(self.area_list) + 1}"
+
+    def refresh_area_point_selector(self):
+        if not hasattr(self, "area_point_list"):
+            return
+        selected = {item.text() for item in self.area_point_list.selectedItems()}
+        ids = [p.point_id for p in self.points] + [wp.point_id for wp in self.work_points]
+        self.area_point_list.blockSignals(True)
+        self.area_point_list.clear()
+        for point_id in ids:
+            item = QtWidgets.QListWidgetItem(point_id)
+            if point_id in selected:
+                item.setSelected(True)
+            self.area_point_list.addItem(item)
+        self.area_point_list.blockSignals(False)
+
+    def add_area_from_selection(self):
+        if not hasattr(self, "area_point_list"):
+            return
+        point_ids = [
+            self.area_point_list.item(row).text()
+            for row in range(self.area_point_list.count())
+            if self.area_point_list.item(row).isSelected()
+        ]
+        if len(point_ids) < 3:
+            self.log("Area: selecciona al menos 3 puntos.")
+            return
+        area_id = clean_cell(self.edit_area_id.text()) or self.next_area_id()
+        existing_ids = {area.area_id for area in self.area_list}
+        if area_id in existing_ids:
+            suffix = 2
+            base = area_id
+            while f"{base}_{suffix}" in existing_ids:
+                suffix += 1
+            area_id = f"{base}_{suffix}"
+        self.area_list.append(AreaDefinition(area_id=area_id, point_ids=point_ids))
+        self.edit_area_id.setText(self.next_area_id())
+        self.refresh_areas()
+        if hasattr(self, "area_table") and self.area_table.rowCount() > 0:
+            self.area_table.selectRow(self.area_table.rowCount() - 1)
+        self.log(f"Area {area_id} creada con {len(point_ids)} puntos.")
+
+    def refresh_areas(self):
+        self.clear_area_items()
+        if hasattr(self, "area_table"):
+            self.area_table.setRowCount(len(self.area_list))
+        for row, area in enumerate(self.area_list):
+            points = self.area_points(area)
+            if hasattr(self, "area_table"):
+                self.area_table.setItem(row, 0, QtWidgets.QTableWidgetItem(area.area_id))
+                self.area_table.setItem(row, 1, QtWidgets.QTableWidgetItem(" -> ".join(area.point_ids)))
+                btn = QtWidgets.QPushButton("✕")
+                btn.setFixedWidth(28)
+                btn.clicked.connect(lambda _checked=False, r=row: self.remove_area_at(r))
+                self.area_table.setCellWidget(row, 2, btn)
+            if len(points) >= 3:
+                self.draw_area(area, points)
+        self.refresh_area_preview()
+
+    def clear_area_items(self):
+        for item in self.area_items:
+            self.plot.removeItem(item)
+        self.area_items = []
+
+    def draw_area(self, area, points):
+        xs = [p.profile_x_mm for p in points] + [points[0].profile_x_mm]
+        ys = [p.profile_y_mm for p in points] + [points[0].profile_y_mm]
+        pen = pg.mkPen((160, 40, 220), width=1.8)
+        item = pg.PlotDataItem(xs, ys, pen=pen)
+        self.plot.addItem(item)
+        label = pg.TextItem(area.area_id, color=(160, 40, 220), anchor=(0, 1))
+        label.setPos(float(np.mean(xs[:-1])), float(np.mean(ys[:-1])))
+        self.plot.addItem(label)
+        self.area_items.extend([item, label])
+
+    def area_points(self, area):
+        points = []
+        for point_id in area.point_ids:
+            point = self._point_by_id_combined(point_id)
+            if point is not None:
+                points.append(point)
+        return points
+
+    def remove_area_at(self, idx):
+        if 0 <= idx < len(self.area_list):
+            removed = self.area_list.pop(idx)
+            self.refresh_areas()
+            self.log(f"Area {removed.area_id} eliminada.")
+
+    def clear_areas(self):
+        self.area_list.clear()
+        self.refresh_areas()
+        self.refresh_area_preview()
+        self.log("Todas las areas borradas.")
+
+    def selected_area_for_preview(self):
+        selected = self.selected_areas()
+        if selected:
+            return selected[0]
+        if self.area_list:
+            return self.area_list[0]
+        return None
+
+    def profile_mask_for_area(self, area):
+        points = self.area_points(area)
+        if len(points) < 3:
+            return np.zeros(self.z.shape, dtype=bool)
+        poly_x = np.array([p.profile_x_mm for p in points], dtype=float)
+        poly_y = np.array([p.profile_y_mm for p in points], dtype=float)
+        cols = (np.arange(self.nx, dtype=float) + 0.5) * self.pixel_size
+        rows = -((np.arange(self.ny, dtype=float) + 0.5) * self.pixel_size)
+        xx, yy = np.meshgrid(cols, rows)
+        inside = np.zeros(xx.shape, dtype=bool)
+        j = len(points) - 1
+        for i in range(len(points)):
+            yi = poly_y[i]
+            yj = poly_y[j]
+            xi = poly_x[i]
+            xj = poly_x[j]
+            crosses = ((yi > yy) != (yj > yy))
+            x_at_y = (xj - xi) * (yy - yi) / ((yj - yi) + 1e-300) + xi
+            inside ^= crosses & (xx < x_at_y)
+            j = i
+        return inside
+
+    def refresh_area_preview(self):
+        if not hasattr(self, "area_preview_item") or self.area_preview_item is None:
+            return
+        area = self.selected_area_for_preview()
+        rgba = np.zeros((*self.z.shape, 4), dtype=np.uint8)
+        stats = []
+        if area is not None:
+            area_mask = self.profile_mask_for_area(area)
+            valid = area_mask & np.isfinite(self.z)
+            levels = self.levels_for_heights(self.z)
+            for level in self.sorted_area_level_ids():
+                pen_idx = self.area_level_pen_assignments.get(int(level), self.default_pen_for_level(level))
+                r, g, b = self.pen_rgb(pen_idx)
+                mask = valid & (levels == int(level))
+                rgba[mask] = np.array([r, g, b, 190], dtype=np.uint8)
+                pixels = int(np.count_nonzero(mask))
+                stats.append((level, pen_idx, (r, g, b), pixels, pixels * self.pixel_size * self.pixel_size))
+        self.area_preview_item.setImage(np.flipud(rgba), autoLevels=False)
+        self.area_preview_item.setRect(QtCore.QRectF(self.x_min, self.y_min, self.x_max - self.x_min, self.y_max - self.y_min))
+        if hasattr(self, "area_stats_table"):
+            self.area_stats_table.setRowCount(len(stats))
+            for row, (level, pen_idx, rgb, pixels, area_mm2) in enumerate(stats):
+                self.area_stats_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"N{level}"))
+                self.area_stats_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"Pen {pen_idx}"))
+                self.area_stats_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{rgb[0]},{rgb[1]},{rgb[2]}"))
+                self.area_stats_table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(pixels)))
+                self.area_stats_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{area_mm2:.4f}"))
 
     def refresh_calibration(self):
         active = [p for p in self.points if p.use_for_affine]
@@ -1779,40 +2203,35 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
                 point_id = clean_cell(row.get("id", "")) or clean_cell(row.get("point_id", ""))
                 if not point_id:
                     continue
+                kind = clean_cell(row.get("kind", "calibration")).lower()
                 use_value = clean_cell(row.get("use_for_affine", "yes")).lower()
-                self.points.append(ControlPoint(
-                    point_id=point_id,
-                    profile_x_mm=float(clean_cell(row["x_profile_mm"])),
-                    profile_y_mm=float(clean_cell(row["y_profile_mm"])),
-                    samlight_x_mm=float(clean_cell(row["x_samlight_mm"])),
-                    samlight_y_mm=float(clean_cell(row["y_samlight_mm"])),
-                    use_for_affine=use_value not in ("no", "false", "0"),
-                ))
+                profile_x = float(clean_cell(row["x_profile_mm"]))
+                profile_y = float(clean_cell(row["y_profile_mm"]))
+                samlight_x = float(clean_cell(row["x_samlight_mm"]))
+                samlight_y = float(clean_cell(row["y_samlight_mm"]))
+                if kind in ("work", "wp", "work_point", "workpoint"):
+                    self.work_points.append(WorkPoint(
+                        point_id=point_id,
+                        profile_x_mm=profile_x,
+                        profile_y_mm=profile_y,
+                        samlight_x_mm=samlight_x,
+                        samlight_y_mm=samlight_y,
+                    ))
+                else:
+                    self.points.append(ControlPoint(
+                        point_id=point_id,
+                        profile_x_mm=profile_x,
+                        profile_y_mm=profile_y,
+                        samlight_x_mm=samlight_x,
+                        samlight_y_mm=samlight_y,
+                        use_for_affine=use_value not in ("no", "false", "0"),
+                    ))
 
     def save_calibration_points(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = CALIBRATION_DIR / f"calibracion_manual_{self.csv_file.stem}_{timestamp}.csv"
         affine_output = CALIBRATION_DIR / f"calibracion_affine_{self.csv_file.stem}_{timestamp}.csv"
-        residuals = self.residuals()
-        rows = [[
-            "id", "x_profile_mm", "y_profile_mm", "x_samlight_mm", "y_samlight_mm",
-            "use_for_affine", "residual_x_mm", "residual_y_mm", "error_mm",
-        ]]
-        for point in self.points:
-            rx, ry, err = residuals.get(point.point_id, ("", "", ""))
-            rows.append([
-                point.point_id,
-                f"{point.profile_x_mm:.6f}",
-                f"{point.profile_y_mm:.6f}",
-                f"{point.samlight_x_mm:.6f}",
-                f"{point.samlight_y_mm:.6f}",
-                "yes" if point.use_for_affine else "no",
-                f"{rx:.6f}" if rx != "" else "",
-                f"{ry:.6f}" if ry != "" else "",
-                f"{err:.6f}" if err != "" else "",
-            ])
-        with output.open("w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows(rows)
+        self.write_manual_calibration_points(output)
 
         affine_rows = [[
             "id", "x_scanner_rel_mm", "y_scanner_rel_mm", "x_samlight_mm", "y_samlight_mm",
@@ -2128,6 +2547,204 @@ class ManualCalibrationQt(QtWidgets.QMainWindow):
         self.profile_list.clear()
         self.refresh_profile_list_table()
         self.log("Lista de perfiles vaciada.")
+
+    def selected_areas(self):
+        if not hasattr(self, "area_table"):
+            return []
+        rows = sorted({idx.row() for idx in self.area_table.selectionModel().selectedRows()})
+        return [self.area_list[row] for row in rows if 0 <= row < len(self.area_list)]
+
+    def export_selected_area_dxf(self):
+        areas = self.selected_areas()
+        if not areas:
+            self.log("Area: selecciona al menos un area en la tabla.")
+            return
+        self.export_areas_dxf(areas, "seleccionadas")
+
+    def export_all_areas_dxf(self):
+        if not self.area_list:
+            self.log("No hay areas definidas.")
+            return
+        self.export_areas_dxf(self.area_list, "todas")
+
+    def area_level_config(self, area, level):
+        cfg = self.area_dxf_config_for_level(level).copy()
+        cfg["layer"] = f"AREA_{safe_layer_name(area.area_id)}_{cfg['layer']}"
+        return cfg
+
+    def horizontal_intervals_for_polygon(self, polygon_xy, y_value):
+        intersections = []
+        count = len(polygon_xy)
+        for idx in range(count):
+            x0, y0 = polygon_xy[idx]
+            x1, y1 = polygon_xy[(idx + 1) % count]
+            if y0 == y1:
+                continue
+            if (y0 <= y_value < y1) or (y1 <= y_value < y0):
+                t = (y_value - y0) / (y1 - y0)
+                intersections.append(x0 + t * (x1 - x0))
+        intersections.sort()
+        intervals = []
+        for idx in range(0, len(intersections) - 1, 2):
+            x_start = intersections[idx]
+            x_end = intersections[idx + 1]
+            if x_end - x_start >= MIN_DXF_SEGMENT_MM:
+                intervals.append((x_start, x_end))
+        return intervals
+
+    def levels_for_heights(self, heights):
+        levels = np.zeros(heights.shape, dtype=int)
+        valid = np.isfinite(heights)
+        ordered = [(level, self.area_level_thresholds[level]) for level in self.sorted_area_level_ids()]
+        for idx, (level, threshold) in enumerate(ordered):
+            if idx + 1 < len(ordered):
+                next_threshold = ordered[idx + 1][1]
+                mask = valid & (heights >= threshold) & (heights < next_threshold)
+            else:
+                mask = valid & (heights >= threshold)
+            levels[mask] = int(level)
+        return levels
+
+    def samlight_to_profile_arrays(self, sx, sy):
+        if self.inverse_affine is None:
+            raise RuntimeError("Falta transformacion inversa SAMLight -> perfil.")
+        sx = np.asarray(sx, dtype=float)
+        sy = np.asarray(sy, dtype=float)
+        px = self.inverse_affine[0, 0] * sx + self.inverse_affine[0, 1] * sy + self.inverse_affine[0, 2]
+        py = self.inverse_affine[1, 0] * sx + self.inverse_affine[1, 1] * sy + self.inverse_affine[1, 2]
+        return px, py
+
+    def merge_area_line_runs(self, runs, x_min, x_max):
+        if not runs:
+            return []
+        expanded = []
+        for level, x0, x1 in runs:
+            left = max(float(x_min), float(x0) - AREA_RUN_PAD_MM)
+            right = min(float(x_max), float(x1) + AREA_RUN_PAD_MM)
+            if right - left >= MIN_DXF_SEGMENT_MM:
+                expanded.append((int(level), left, right))
+        if not expanded:
+            return []
+
+        expanded.sort(key=lambda item: (item[0], item[1]))
+        merged = []
+        current_level, current_start, current_end = expanded[0]
+        for level, start, end in expanded[1:]:
+            if level == current_level and start - current_end <= AREA_RUN_MERGE_GAP_MM:
+                current_end = max(current_end, end)
+                continue
+            if current_end - current_start >= MIN_DXF_SEGMENT_MM:
+                merged.append((current_level, current_start, current_end))
+            current_level, current_start, current_end = level, start, end
+        if current_end - current_start >= MIN_DXF_SEGMENT_MM:
+            merged.append((current_level, current_start, current_end))
+        return merged
+
+    def area_samlight_segments(self, area):
+        polygon = self.area_points(area)
+        if len(polygon) < 3:
+            self.log(f"[AVISO] Area {area.area_id}: faltan puntos validos.")
+            return []
+
+        polygon_xy = [(p.samlight_x_mm, p.samlight_y_mm) for p in polygon]
+        y_values = np.array([p[1] for p in polygon_xy], dtype=float)
+        y_min = float(np.min(y_values))
+        y_max = float(np.max(y_values))
+        if y_max - y_min < AREA_HATCH_SPACING_MM:
+            scanlines = np.array([(y_min + y_max) * 0.5], dtype=float)
+        else:
+            scanlines = np.arange(y_min + AREA_HATCH_SPACING_MM * 0.5, y_max, AREA_HATCH_SPACING_MM)
+            if scanlines.size == 0:
+                scanlines = np.array([(y_min + y_max) * 0.5], dtype=float)
+
+        sample_step = max(min(self.pixel_size, AREA_HATCH_SPACING_MM), 0.001)
+        segments = []
+        for sy in scanlines:
+            intervals = self.horizontal_intervals_for_polygon(polygon_xy, float(sy))
+            for x_start, x_end in intervals:
+                count = max(2, int(np.ceil((x_end - x_start) / sample_step)) + 1)
+                sx_samples = np.linspace(x_start, x_end, count)
+                sy_samples = np.full(sx_samples.shape, sy, dtype=float)
+                px_samples, py_samples = self.samlight_to_profile_arrays(sx_samples, sy_samples)
+                heights = self.sample_height(px_samples, py_samples)
+                levels = self.levels_for_heights(heights)
+                start = None
+                current_level = 0
+                raw_runs = []
+                for idx, level in enumerate(levels):
+                    level = int(level)
+                    if level <= 0:
+                        if start is not None:
+                            if sx_samples[idx - 1] - sx_samples[start] >= MIN_DXF_SEGMENT_MM:
+                                raw_runs.append((current_level, sx_samples[start], sx_samples[idx - 1]))
+                            start = None
+                            current_level = 0
+                        continue
+                    if start is None:
+                        start = idx
+                        current_level = level
+                        continue
+                    if level != current_level:
+                        if sx_samples[idx - 1] - sx_samples[start] >= MIN_DXF_SEGMENT_MM:
+                            raw_runs.append((current_level, sx_samples[start], sx_samples[idx - 1]))
+                        start = idx
+                        current_level = level
+                if start is not None and sx_samples[-1] - sx_samples[start] >= MIN_DXF_SEGMENT_MM:
+                    raw_runs.append((current_level, sx_samples[start], sx_samples[-1]))
+                for level, merged_start, merged_end in self.merge_area_line_runs(raw_runs, x_start, x_end):
+                    segments.append((level, merged_start, sy, merged_end, sy))
+        return segments
+
+    def export_areas_dxf(self, areas, label):
+        if self.affine_x is None:
+            self.log("Areas: necesitas calibracion afin activa (minimo 3 puntos).")
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if len(areas) == 1:
+            output = DXF_OUTPUT_DIR / f"Area_Samlight_{self.csv_file.stem}_{safe_layer_name(areas[0].area_id)}_{timestamp}.dxf"
+        else:
+            output = DXF_OUTPUT_DIR / f"Areas_Samlight_{self.csv_file.stem}_{timestamp}.dxf"
+        svg_output = output.with_suffix(".svg")
+
+        layer_configs = []
+        seen_layers = set()
+        for area in areas:
+            for level in self.sorted_area_level_ids():
+                cfg = self.area_level_config(area, level)
+                if cfg["layer"] not in seen_layers:
+                    seen_layers.add(cfg["layer"])
+                    layer_configs.append(cfg)
+
+        lines = dxf_header(layer_configs)
+        svg_segments = []
+        exported = {area.area_id: 0 for area in areas}
+        skipped_empty = 0
+        for area in areas:
+            samlight_segments = self.area_samlight_segments(area)
+            if not samlight_segments:
+                skipped_empty += 1
+                continue
+            for level, sx0, sy0, sx1, sy1 in samlight_segments:
+                cfg = self.area_level_config(area, level)
+                add_dxf_line(lines, cfg["layer"], cfg["color"], sx0, sy0, sx1, sy1)
+                svg_segments.append({
+                    "layer": cfg["layer"],
+                    "rgb": svg_rgb_for_config(cfg),
+                    "x0": float(sx0), "y0": float(sy0),
+                    "x1": float(sx1), "y1": float(sy1),
+                })
+                exported[area.area_id] += 1
+
+        if not svg_segments:
+            self.log("Areas: no se generaron segmentos. Revisa poligono y niveles de altura.")
+            return
+        lines.extend(["0", "ENDSEC", "0", "EOF"])
+        output.write_text("\n".join(lines) + "\n", encoding="ascii")
+        write_svg_lines(svg_output, svg_segments)
+        exported_text = " ".join(f"{area_id}={count}" for area_id, count in exported.items())
+        self.log(
+            f"DXF areas ({label}) guardado:\n{output}\nSVG paralelo:\n{svg_output}\n"
+            f"{exported_text} | areas vacias={skipped_empty}")
 
     def export_all_profiles_dxf(self):
         if not self.profile_list:

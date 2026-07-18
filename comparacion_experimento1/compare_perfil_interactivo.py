@@ -180,7 +180,7 @@ class Calibracion:
 
     def __init__(self, a: complex = None, b: complex = None,
                  affine_x=None, affine_y=None, inverse_affine=None,
-                 source=''):
+                 source='', saved_points=None):
         self._a  = a
         self._ai = 1.0 / a if a is not None else None
         self._b  = b
@@ -188,6 +188,7 @@ class Calibracion:
         self.affine_y = affine_y
         self.inverse_affine = inverse_affine
         self.source = source
+        self.saved_points = saved_points or []
 
     def perfil_a_samlight(self, x_p, y_p):
         if self.affine_x is not None and self.affine_y is not None:
@@ -212,14 +213,25 @@ class Calibracion:
             for r in _csv.DictReader(f):
                 rows.append({k.strip(): v.strip() for k, v in r.items()})
         pts = []
+        saved_points = []
         for r in rows:
             try:
-                use = r.get('use_for_affine', 'yes').lower() not in ('no','false','0')
-                if not use:
-                    continue
+                kind = r.get('kind', 'calibration').lower() or 'calibration'
+                point_id = r.get('id', '') or r.get('point_id', '')
                 xp = float(r['x_profile_mm']); yp = float(r['y_profile_mm'])
                 xs = float(r['x_samlight_mm']); ys = float(r['y_samlight_mm'])
-                pts.append((xp, yp, xs, ys))
+                use = r.get('use_for_affine', 'yes').lower() not in ('no','false','0')
+                saved_points.append({
+                    'kind': kind,
+                    'id': point_id,
+                    'x_profile_mm': xp,
+                    'y_profile_mm': yp,
+                    'x_samlight_mm': xs,
+                    'y_samlight_mm': ys,
+                    'use_for_affine': use,
+                })
+                if kind not in ('work', 'wp', 'work_point', 'workpoint') and use:
+                    pts.append((xp, yp, xs, ys))
             except (ValueError, KeyError):
                 continue
         if len(pts) < 2:
@@ -247,10 +259,11 @@ class Calibracion:
                   f"puntos={len(pts)}  err_med={np.mean(err)*1000:.2f} um  "
                   f"err_max={np.max(err)*1000:.2f} um")
             return cls(affine_x=affine_x, affine_y=affine_y,
-                       inverse_affine=inverse_affine, source=Path(path).name)
+                       inverse_affine=inverse_affine, source=Path(path).name,
+                       saved_points=saved_points)
         i, j = 0, len(pts) - 1
         return cls._from_two_points(pts[i, :2], pts[i, 2:4], pts[j, :2], pts[j, 2:4],
-                                    source=Path(path).name)
+                                    source=Path(path).name, saved_points=saved_points)
 
     @classmethod
     def desde_csv_perfil(cls, path):
@@ -270,7 +283,7 @@ class Calibracion:
                                     source=Path(path).name)
 
     @classmethod
-    def _from_two_points(cls, p1_prof, p1_sam, p2_prof, p2_sam, source=''):
+    def _from_two_points(cls, p1_prof, p1_sam, p2_prof, p2_sam, source='', saved_points=None):
         z1p = complex(*p1_prof); z2p = complex(*p2_prof)
         z1s = complex(*p1_sam);  z2s = complex(*p2_sam)
         if abs(z2p - z1p) < 1e-9:
@@ -280,7 +293,7 @@ class Calibracion:
         print(f"  Calibracion OK [{source}]  "
               f"escala={abs(a):.4f}  rotacion={np.degrees(np.angle(a)):.3f}  "
               f"trasl=({b.real:.3f}, {b.imag:.3f}) mm")
-        return cls(a=a, b=b, source=source)
+        return cls(a=a, b=b, source=source, saved_points=saved_points)
 
 
 def buscar_calibracion_auto(pre_stem, base_dir):
@@ -728,6 +741,7 @@ class VentanaPrincipal(QtWidgets.QMainWindow):
         self._aplicar_tema()
         self._build_ui()
         self._actualizar_mapa('delta')
+        self._cargar_puntos_guardados()
 
     # ── Tema ──────────────────────────────────────────────────────────────────
     def _aplicar_tema(self):
@@ -1076,6 +1090,46 @@ class VentanaPrincipal(QtWidgets.QMainWindow):
             self.img_item.setColorMap(
                 pg.colormap.get('RdBu_r', source='matplotlib'))
             self.cbar.setLevels((-d_max, d_max))
+
+    def _unique_punto_id(self, raw_id):
+        base = str(raw_id or '').strip() or f"PT{len(self._puntos_def) + 1}"
+        used = {pt.punto_id for pt in self._puntos_def}
+        if base not in used:
+            return base
+        suffix = 2
+        while f"{base}_{suffix}" in used:
+            suffix += 1
+        return f"{base}_{suffix}"
+
+    def _cargar_puntos_guardados(self):
+        saved = getattr(self.cal, 'saved_points', None) if self.cal is not None else None
+        if not saved:
+            return
+        loaded = 0
+        for row in saved:
+            try:
+                x_sam = float(row['x_samlight_mm'])
+                y_sam = float(row['y_samlight_mm'])
+                if self.cal is not None:
+                    x_prof, y_prof = self.cal.samlight_a_perfil(x_sam, y_sam)
+                else:
+                    x_prof = float(row['x_profile_mm'])
+                    y_prof = float(row['y_profile_mm'])
+                point_id = self._unique_punto_id(row.get('id') or row.get('point_id'))
+                self._puntos_def.append(PuntoDefinido(
+                    point_id,
+                    float(x_prof),
+                    float(y_prof),
+                    x_sam,
+                    y_sam,
+                ))
+                loaded += 1
+            except (TypeError, ValueError, KeyError):
+                continue
+        if loaded:
+            self._refresh_puntos()
+            self.statusBar().showMessage(
+                f"Cargados {loaded} puntos guardados desde {self.cal.source}")
 
     # ── Mouse move ────────────────────────────────────────────────────────────
     def _on_mouse_move(self, evt):
